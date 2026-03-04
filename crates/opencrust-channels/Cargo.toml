@@ -28,7 +28,7 @@ dirs = { version = "6", optional = true }
 [features]
 default = []
 discord = ["dep:serenity", "dep:poise"]
-telegram = ["dep:teloxide"]
+telegram = ["dep:teloxide", "dep:futures"]
 slack = ["dep:tokio-tungstenite", "dep:futures"]
 whatsapp = ["dep:axum"]
 whatsapp-web = ["dep:dirs"]

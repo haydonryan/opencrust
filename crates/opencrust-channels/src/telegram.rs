@@ -4,9 +4,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::future::BoxFuture;
 use teloxide::dispatching::UpdateFilterExt;
+use teloxide::error_handlers::ErrorHandler;
 use teloxide::prelude::*;
 use teloxide::types::{ChatAction, InputFile, ParseMode};
+use teloxide::{ApiError, RequestError, update_listeners};
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
@@ -51,6 +54,26 @@ pub type OnMessageFn = Arc<
         + Send
         + Sync,
 >;
+
+/// Custom error handler for Telegram polling errors.
+/// Detects `TerminatedByOtherGetUpdates` and logs a clear warning instead of
+/// a generic error, helping users diagnose stale polling sessions on restart.
+struct TelegramPollingErrorHandler;
+
+impl ErrorHandler<RequestError> for TelegramPollingErrorHandler {
+    fn handle_error(self: Arc<Self>, error: RequestError) -> BoxFuture<'static, ()> {
+        Box::pin(async move {
+            if let RequestError::Api(ApiError::TerminatedByOtherGetUpdates) = &error {
+                warn!(
+                    "telegram: another process is polling this bot token \
+                     - it will be disconnected in favor of this instance"
+                );
+            } else {
+                error!("telegram polling error: {error}");
+            }
+        })
+    }
+}
 
 pub struct TelegramChannel {
     bot_token: String,
@@ -228,6 +251,19 @@ impl ChannelLifecycle for TelegramChannel {
 
     async fn connect(&mut self) -> Result<()> {
         let bot = Bot::new(&self.bot_token);
+
+        // Pre-flight: validate token and log bot identity
+        let me = bot.get_me().await.map_err(|e| {
+            opencrust_common::Error::Channel(format!("telegram get_me failed (bad token?): {e}"))
+        })?;
+        let username = me.username();
+        info!("telegram bot @{username} validated");
+
+        // Clear any stale webhook/polling session from a previous instance
+        if let Err(e) = bot.delete_webhook().await {
+            warn!("telegram: failed to clear webhook (non-fatal): {e}");
+        }
+
         self.bot = Some(bot.clone());
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -412,6 +448,8 @@ impl ChannelLifecycle for TelegramChannel {
                 },
             );
 
+            let listener = update_listeners::polling_default(bot.clone()).await;
+
             let mut dispatcher = Dispatcher::builder(bot, handler)
                 .default_handler(|upd| async move {
                     tracing::trace!("unhandled update: {:?}", upd.kind);
@@ -430,9 +468,10 @@ impl ChannelLifecycle for TelegramChannel {
                     }
                 }
             });
-
             info!("telegram bot polling started");
-            dispatcher.dispatch().await;
+            dispatcher
+                .dispatch_with_listener(listener, Arc::new(TelegramPollingErrorHandler))
+                .await;
             info!("telegram bot polling stopped");
         });
 
