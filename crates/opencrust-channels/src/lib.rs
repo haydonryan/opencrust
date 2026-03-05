@@ -16,18 +16,18 @@ pub mod slack;
 pub mod whatsapp;
 
 #[cfg(all(target_os = "macos", feature = "imessage"))]
-pub use imessage::{IMessageChannel, IMessageOnMessageFn};
+pub use imessage::{IMessageChannel, IMessageGroupFilter, IMessageOnMessageFn};
 pub use protocol::{
     CONNECTOR_PROTOCOL_VERSION, ConnectorCapability, ConnectorFrame, ConnectorHandshake,
     MAX_CONNECTOR_FRAME_BYTES,
 };
 pub use registry::ChannelRegistry;
 #[cfg(feature = "slack")]
-pub use slack::{SlackChannel, SlackOnMessageFn};
+pub use slack::{SlackChannel, SlackGroupFilter, SlackOnMessageFn};
 #[cfg(feature = "telegram")]
 pub use telegram::{GroupFilter, MediaAttachment, OnMessageFn, TelegramChannel};
 pub use traits::{Channel, ChannelEvent, ChannelLifecycle, ChannelSender, ChannelStatus};
 #[cfg(feature = "whatsapp-web")]
-pub use whatsapp::web::WhatsAppWebChannel;
+pub use whatsapp::web::{WhatsAppWebChannel, WhatsAppWebGroupFilter};
 #[cfg(feature = "whatsapp")]
 pub use whatsapp::{WhatsAppChannel, WhatsAppOnMessageFn};

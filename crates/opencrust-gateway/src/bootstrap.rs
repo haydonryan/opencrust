@@ -7,10 +7,10 @@ use opencrust_agents::{
     FileWriteTool, McpManager, OllamaProvider, OpenAiProvider, WebFetchTool, WebSearchTool,
 };
 #[cfg(target_os = "macos")]
-use opencrust_channels::{IMessageChannel, IMessageOnMessageFn};
+use opencrust_channels::{IMessageChannel, IMessageGroupFilter, IMessageOnMessageFn};
 use opencrust_channels::{
-    MediaAttachment, SlackChannel, SlackOnMessageFn, TelegramChannel, WhatsAppChannel,
-    WhatsAppOnMessageFn, WhatsAppWebChannel,
+    MediaAttachment, SlackChannel, SlackGroupFilter, SlackOnMessageFn, TelegramChannel,
+    WhatsAppChannel, WhatsAppOnMessageFn, WhatsAppWebChannel, WhatsAppWebGroupFilter,
 };
 use opencrust_config::AppConfig;
 use opencrust_db::MemoryStore;
@@ -1555,26 +1555,38 @@ pub fn build_slack_channels(
             std::time::Duration::from_secs(300),
         )));
 
-        let default_policy = Arc::new(ChannelPolicy::default());
+        let policy = Arc::new(ChannelPolicy::from_settings(&channel_config.settings));
+
+        let bot_user_id = channel_config
+            .settings
+            .get("bot_user_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let group_filter: SlackGroupFilter = {
+            let policy = Arc::clone(&policy);
+            Arc::new(move |is_mentioned| policy.should_process_group(is_mentioned))
+        };
 
         let state_for_cb = Arc::clone(state);
         let allowlist_for_cb = Arc::clone(&allowlist);
         let pairing_for_cb = Arc::clone(&pairing);
-        let policy_for_cb = Arc::clone(&default_policy);
+        let policy_for_cb = Arc::clone(&policy);
 
         let on_message: SlackOnMessageFn = Arc::new(
             move |channel_id: String,
                   user_id: String,
                   user_name: String,
                   text: String,
+                  is_group: bool,
                   delta_tx: Option<tokio::sync::mpsc::Sender<String>>| {
                 let state = Arc::clone(&state_for_cb);
                 let allowlist = Arc::clone(&allowlist_for_cb);
                 let pairing = Arc::clone(&pairing_for_cb);
                 let policy = Arc::clone(&policy_for_cb);
                 Box::pin(async move {
-                    // Allowlist / pairing check
-                    {
+                    // Groups already filtered by channel handler - skip auth for groups
+                    if !is_group {
                         let mut list = allowlist.lock().unwrap();
                         match check_dm_auth(
                             &policy, &mut list, &pairing, &user_id, &user_name, &text, "slack",
@@ -1649,7 +1661,13 @@ pub fn build_slack_channels(
             },
         );
 
-        let channel = SlackChannel::new(bot_token, app_token, on_message);
+        let channel = SlackChannel::with_group_filter(
+            bot_token,
+            app_token,
+            on_message,
+            group_filter,
+            bot_user_id,
+        );
         channels.push(Box::new(channel) as Box<dyn opencrust_channels::Channel>);
         info!("configured slack channel: {name}");
     }
@@ -1733,24 +1751,25 @@ pub fn build_whatsapp_channels(
             std::time::Duration::from_secs(300),
         )));
 
-        let default_policy = Arc::new(ChannelPolicy::default());
+        let policy = Arc::new(ChannelPolicy::from_settings(&channel_config.settings));
 
         let state_for_cb = Arc::clone(state);
         let allowlist_for_cb = Arc::clone(&allowlist);
         let pairing_for_cb = Arc::clone(&pairing);
-        let policy_for_cb = Arc::clone(&default_policy);
+        let policy_for_cb = Arc::clone(&policy);
 
         let on_message: WhatsAppOnMessageFn = Arc::new(
             move |from_number: String,
                   user_name: String,
                   text: String,
+                  _is_group: bool,
                   delta_tx: Option<tokio::sync::mpsc::Sender<String>>| {
                 let state = Arc::clone(&state_for_cb);
                 let allowlist = Arc::clone(&allowlist_for_cb);
                 let pairing = Arc::clone(&pairing_for_cb);
                 let policy = Arc::clone(&policy_for_cb);
                 Box::pin(async move {
-                    // Allowlist / pairing check
+                    // WhatsApp Business is DM-only, always check auth
                     {
                         let mut list = allowlist.lock().unwrap();
                         match check_dm_auth(
@@ -1889,25 +1908,44 @@ pub fn build_whatsapp_web_channels(
             std::time::Duration::from_secs(300),
         )));
 
-        let default_policy = Arc::new(ChannelPolicy::default());
+        let policy = Arc::new(ChannelPolicy::from_settings(&channel_config.settings));
+
+        // Warn if group_policy: mention is set - WhatsApp has no mention detection
+        if channel_config
+            .settings
+            .get("group_policy")
+            .and_then(|v| v.as_str())
+            == Some("mention")
+        {
+            warn!(
+                "whatsapp-web channel '{name}': group_policy 'mention' is not supported \
+                 (WhatsApp has no standard mention format) - acting as 'disabled'"
+            );
+        }
+
+        let group_filter: WhatsAppWebGroupFilter = {
+            let policy = Arc::clone(&policy);
+            Arc::new(move |is_mentioned| policy.should_process_group(is_mentioned))
+        };
 
         let state_for_cb = Arc::clone(state);
         let allowlist_for_cb = Arc::clone(&allowlist);
         let pairing_for_cb = Arc::clone(&pairing);
-        let policy_for_cb = Arc::clone(&default_policy);
+        let policy_for_cb = Arc::clone(&policy);
 
         let on_message: WhatsAppOnMessageFn = Arc::new(
             move |from_jid: String,
                   user_name: String,
                   text: String,
+                  is_group: bool,
                   delta_tx: Option<tokio::sync::mpsc::Sender<String>>| {
                 let state = Arc::clone(&state_for_cb);
                 let allowlist = Arc::clone(&allowlist_for_cb);
                 let pairing = Arc::clone(&pairing_for_cb);
                 let policy = Arc::clone(&policy_for_cb);
                 Box::pin(async move {
-                    // Allowlist / pairing check
-                    {
+                    // Groups already filtered by channel handler - skip auth for groups
+                    if !is_group {
                         let mut list = allowlist.lock().unwrap();
                         match check_dm_auth(
                             &policy,
@@ -1988,7 +2026,7 @@ pub fn build_whatsapp_web_channels(
             },
         );
 
-        let channel = WhatsAppWebChannel::new(on_message);
+        let channel = WhatsAppWebChannel::with_group_filter(on_message, group_filter);
         channels.push(channel);
         info!("configured whatsapp-web channel: {name}");
     }
@@ -2025,25 +2063,44 @@ pub fn build_imessage_channels(
             std::time::Duration::from_secs(300),
         )));
 
-        let default_policy = Arc::new(ChannelPolicy::default());
+        let policy = Arc::new(ChannelPolicy::from_settings(&channel_config.settings));
+
+        // Warn if group_policy: mention is set - iMessage has no mention concept
+        if channel_config
+            .settings
+            .get("group_policy")
+            .and_then(|v| v.as_str())
+            == Some("mention")
+        {
+            warn!(
+                "imessage channel '{name}': group_policy 'mention' is not supported \
+                 (iMessage has no mention concept) - acting as 'disabled'"
+            );
+        }
+
+        let group_filter: IMessageGroupFilter = {
+            let policy = Arc::clone(&policy);
+            Arc::new(move |is_mentioned| policy.should_process_group(is_mentioned))
+        };
 
         let state_for_cb = Arc::clone(state);
         let allowlist_for_cb = Arc::clone(&allowlist);
         let pairing_for_cb = Arc::clone(&pairing);
-        let policy_for_cb = Arc::clone(&default_policy);
+        let policy_for_cb = Arc::clone(&policy);
 
         let on_message: IMessageOnMessageFn = Arc::new(
             move |session_key: String,
                   sender_id: String,
                   text: String,
+                  is_group: bool,
                   _delta_tx: Option<tokio::sync::mpsc::Sender<String>>| {
                 let state = Arc::clone(&state_for_cb);
                 let allowlist = Arc::clone(&allowlist_for_cb);
                 let pairing = Arc::clone(&pairing_for_cb);
                 let policy = Arc::clone(&policy_for_cb);
                 Box::pin(async move {
-                    // Allowlist / pairing check (always against the actual sender)
-                    {
+                    // Groups already filtered by channel handler - skip auth for groups
+                    if !is_group {
                         let mut list = allowlist.lock().unwrap();
                         match check_dm_auth(
                             &policy, &mut list, &pairing, &sender_id, "", &text, "imessage",
@@ -2105,7 +2162,8 @@ pub fn build_imessage_channels(
             },
         );
 
-        let channel = IMessageChannel::new(poll_interval_secs, on_message);
+        let channel =
+            IMessageChannel::with_group_filter(poll_interval_secs, on_message, group_filter);
         channels.push(Box::new(channel) as Box<dyn opencrust_channels::Channel>);
         info!("configured imessage channel: {name}");
     }

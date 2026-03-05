@@ -13,6 +13,11 @@ use opencrust_common::{Message, MessageContent, Result};
 
 use super::WhatsAppOnMessageFn;
 
+/// Group filter closure for WhatsApp Web channels.
+/// Argument: `is_mentioned` (always `false` - WhatsApp has no standard mention format).
+/// Returns `true` if the message should be processed.
+pub type WhatsAppWebGroupFilter = Arc<dyn Fn(bool) -> bool + Send + Sync>;
+
 /// Shared sender handle that gets populated when the sidecar process starts.
 type SharedStdinTx = Arc<tokio::sync::Mutex<Option<mpsc::Sender<String>>>>;
 
@@ -45,12 +50,20 @@ pub struct WhatsAppWebChannel {
     status: ChannelStatus,
     display: String,
     on_message: WhatsAppOnMessageFn,
+    group_filter: WhatsAppWebGroupFilter,
     auth_dir: PathBuf,
     sidecar_dir: PathBuf,
 }
 
 impl WhatsAppWebChannel {
     pub fn new(on_message: WhatsAppOnMessageFn) -> Self {
+        Self::with_group_filter(on_message, Arc::new(|_| true))
+    }
+
+    pub fn with_group_filter(
+        on_message: WhatsAppOnMessageFn,
+        group_filter: WhatsAppWebGroupFilter,
+    ) -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let config_dir = home.join(".opencrust");
 
@@ -61,6 +74,7 @@ impl WhatsAppWebChannel {
             status: ChannelStatus::Disconnected,
             display: "WhatsApp Web".to_string(),
             on_message,
+            group_filter,
             auth_dir: config_dir.join("whatsapp-web-auth"),
             sidecar_dir: config_dir.join("sidecar").join("whatsapp-web"),
         }
@@ -234,6 +248,7 @@ impl ChannelLifecycle for WhatsAppWebChannel {
 
         // Reader task: parse events from sidecar stdout
         let on_message = Arc::clone(&self.on_message);
+        let group_filter = Arc::clone(&self.group_filter);
         let reply_tx = stdin_tx;
 
         tokio::spawn(async move {
@@ -271,8 +286,27 @@ impl ChannelLifecycle for WhatsAppWebChannel {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
+                        let is_group = event
+                            .get("isGroup")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        // For group messages, reply to the group JID, not the participant
+                        let reply_to = if is_group {
+                            event
+                                .get("groupJid")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(&from)
+                                .to_string()
+                        } else {
+                            from.clone()
+                        };
 
                         if from.is_empty() || text.is_empty() {
+                            continue;
+                        }
+
+                        // Apply group filter (no mention detection for WhatsApp)
+                        if is_group && !group_filter(false) {
                             continue;
                         }
 
@@ -280,11 +314,11 @@ impl ChannelLifecycle for WhatsAppWebChannel {
                         let on_message = Arc::clone(&on_message);
 
                         tokio::spawn(async move {
-                            match (on_message)(from.clone(), name, text, None).await {
+                            match (on_message)(from.clone(), name, text, is_group, None).await {
                                 Ok(response) => {
                                     let cmd = serde_json::json!({
                                         "type": "send",
-                                        "to": from,
+                                        "to": reply_to,
                                         "text": response,
                                     });
                                     let _ = reply_tx
@@ -401,11 +435,37 @@ mod tests {
 
     #[test]
     fn channel_type_is_whatsapp_web() {
-        let on_msg: WhatsAppOnMessageFn =
-            Arc::new(|_from, _user, _text, _delta_tx| Box::pin(async { Ok("test".to_string()) }));
+        let on_msg: WhatsAppOnMessageFn = Arc::new(|_from, _user, _text, _is_group, _delta_tx| {
+            Box::pin(async { Ok("test".to_string()) })
+        });
         let channel = WhatsAppWebChannel::new(on_msg);
         assert_eq!(channel.channel_type(), "whatsapp-web");
         assert_eq!(channel.display_name(), "WhatsApp Web");
         assert_eq!(channel.status(), ChannelStatus::Disconnected);
+    }
+
+    #[test]
+    fn whatsapp_web_group_filter_blocks() {
+        let filter: WhatsAppWebGroupFilter = Arc::new(|_mentioned| false);
+        assert!(!filter(false));
+    }
+
+    #[test]
+    fn sidecar_event_is_group_parsing() {
+        let event: serde_json::Value = serde_json::json!({
+            "type": "message",
+            "from": "1234@s.whatsapp.net",
+            "name": "Test",
+            "text": "hello",
+            "isGroup": true,
+            "groupJid": "group@g.us",
+        });
+        let is_group = event
+            .get("isGroup")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        assert!(is_group);
+        let group_jid = event.get("groupJid").and_then(|v| v.as_str()).unwrap_or("");
+        assert_eq!(group_jid, "group@g.us");
     }
 }

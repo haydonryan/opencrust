@@ -82,10 +82,9 @@ async function start() {
     if (upsertType !== "notify") return;
 
     for (const msg of messages) {
-      // Ignore own messages, status broadcasts, and group messages
+      // Ignore own messages and status broadcasts
       if (msg.key.fromMe) continue;
       if (msg.key.remoteJid === "status@broadcast") continue;
-      if (msg.key.remoteJid?.endsWith("@g.us")) continue;
 
       const text =
         msg.message?.conversation ||
@@ -94,12 +93,21 @@ async function start() {
 
       if (!text) continue;
 
+      const isGroup = msg.key.remoteJid?.endsWith("@g.us") || false;
+      // For group messages, use participant JID as the sender identity
+      const from = isGroup
+        ? (msg.key.participant || msg.key.remoteJid || "")
+        : (msg.key.remoteJid || "");
+
       emit({
         type: "message",
         id: msg.key.id || "",
-        from: msg.key.remoteJid || "",
+        from,
         name: msg.pushName || "",
         text,
+        isGroup,
+        // Include the group JID so replies go to the right place
+        ...(isGroup && { groupJid: msg.key.remoteJid }),
       });
     }
   });

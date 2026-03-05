@@ -17,7 +17,7 @@ use opencrust_common::{Message, MessageContent, Result};
 
 /// Callback invoked when the bot receives a text message from WhatsApp.
 ///
-/// Arguments: `(from_number, user_name, text, delta_tx)`.
+/// Arguments: `(from_number, user_name, text, is_group, delta_tx)`.
 /// `delta_tx` is always `None` for WhatsApp (no streaming support).
 /// Return `Err("__blocked__")` to silently drop the message (unauthorized user).
 pub type WhatsAppOnMessageFn = Arc<
@@ -25,6 +25,7 @@ pub type WhatsAppOnMessageFn = Arc<
             String,
             String,
             String,
+            bool,
             Option<mpsc::Sender<String>>,
         ) -> Pin<Box<dyn Future<Output = std::result::Result<String, String>> + Send>>
         + Send
@@ -90,7 +91,8 @@ impl WhatsAppChannel {
             from.to_string(),
             user_name.to_string(),
             text.to_string(),
-            None, // No streaming for WhatsApp
+            false, // WhatsApp Business is DM-only
+            None,  // No streaming for WhatsApp
         )
         .await
     }
@@ -206,8 +208,9 @@ mod tests {
 
     #[test]
     fn channel_type_is_whatsapp() {
-        let on_msg: WhatsAppOnMessageFn =
-            Arc::new(|_from, _user, _text, _delta_tx| Box::pin(async { Ok("test".to_string()) }));
+        let on_msg: WhatsAppOnMessageFn = Arc::new(|_from, _user, _text, _is_group, _delta_tx| {
+            Box::pin(async { Ok("test".to_string()) })
+        });
         let channel = WhatsAppChannel::new(
             "fake-token".to_string(),
             "123456".to_string(),

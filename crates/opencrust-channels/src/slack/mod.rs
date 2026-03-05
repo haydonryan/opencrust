@@ -15,9 +15,14 @@ use tracing::{error, info, warn};
 use crate::traits::{ChannelLifecycle, ChannelSender, ChannelStatus};
 use opencrust_common::{Message, MessageContent, Result};
 
+/// Group filter closure for Slack channels.
+/// Argument: `is_mentioned` (whether the bot was mentioned).
+/// Returns `true` if the message should be processed.
+pub type SlackGroupFilter = Arc<dyn Fn(bool) -> bool + Send + Sync>;
+
 /// Callback invoked when the bot receives a text message from Slack.
 ///
-/// Arguments: `(channel_id, user_id, user_name, text, delta_sender)`.
+/// Arguments: `(channel_id, user_id, user_name, text, is_group, delta_sender)`.
 /// When `delta_sender` is `Some`, the callback should send text deltas through it
 /// for streaming display. The callback still returns the final complete text.
 /// Return `Err("__blocked__")` to silently drop the message (unauthorized user).
@@ -27,6 +32,7 @@ pub type SlackOnMessageFn = Arc<
             String,
             String,
             String,
+            bool,
             Option<mpsc::Sender<String>>,
         ) -> Pin<Box<dyn Future<Output = std::result::Result<String, String>> + Send>>
         + Send
@@ -39,17 +45,31 @@ pub struct SlackChannel {
     display: String,
     status: ChannelStatus,
     on_message: SlackOnMessageFn,
+    group_filter: SlackGroupFilter,
+    bot_user_id: Option<String>,
     shutdown_tx: Option<watch::Sender<bool>>,
 }
 
 impl SlackChannel {
     pub fn new(bot_token: String, app_token: String, on_message: SlackOnMessageFn) -> Self {
+        Self::with_group_filter(bot_token, app_token, on_message, Arc::new(|_| true), None)
+    }
+
+    pub fn with_group_filter(
+        bot_token: String,
+        app_token: String,
+        on_message: SlackOnMessageFn,
+        group_filter: SlackGroupFilter,
+        bot_user_id: Option<String>,
+    ) -> Self {
         Self {
             bot_token,
             app_token,
             display: "Slack".to_string(),
             status: ChannelStatus::Disconnected,
             on_message,
+            group_filter,
+            bot_user_id,
             shutdown_tx: None,
         }
     }
@@ -88,12 +108,23 @@ impl ChannelLifecycle for SlackChannel {
         let bot_token = self.bot_token.clone();
         let app_token = self.app_token.clone();
         let on_message = Arc::clone(&self.on_message);
+        let group_filter = Arc::clone(&self.group_filter);
+        let bot_user_id = self.bot_user_id.clone();
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         self.shutdown_tx = Some(shutdown_tx);
 
         tokio::spawn(async move {
-            run_socket_mode(client, bot_token, app_token, on_message, shutdown_rx).await;
+            run_socket_mode(
+                client,
+                bot_token,
+                app_token,
+                on_message,
+                group_filter,
+                bot_user_id,
+                shutdown_rx,
+            )
+            .await;
         });
 
         self.status = ChannelStatus::Connected;
@@ -160,6 +191,8 @@ async fn run_socket_mode(
     bot_token: String,
     app_token: String,
     on_message: SlackOnMessageFn,
+    group_filter: SlackGroupFilter,
+    bot_user_id: Option<String>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     loop {
@@ -209,6 +242,8 @@ async fn run_socket_mode(
                                     &client,
                                     &bot_token,
                                     &on_message,
+                                    &group_filter,
+                                    bot_user_id.as_deref(),
                                     &ws_write,
                                 ).await;
                                 if let HandleResult::Reconnect = handled {
@@ -271,6 +306,8 @@ async fn handle_socket_event(
     client: &Client,
     bot_token: &str,
     on_message: &SlackOnMessageFn,
+    group_filter: &SlackGroupFilter,
+    bot_user_id: Option<&str>,
     ws_write: &WsWriter,
 ) -> HandleResult {
     let envelope: serde_json::Value = match serde_json::from_str(raw) {
@@ -349,11 +386,24 @@ async fn handle_socket_event(
                 return HandleResult::Ok;
             }
 
+            // Slack channel IDs starting with 'D' are DMs, everything else is a group/channel
+            let is_group = !channel_id.starts_with('D');
+
+            if is_group {
+                let is_mentioned = bot_user_id
+                    .map(|id| text.contains(&format!("<@{id}>")))
+                    .unwrap_or(false);
+                if !group_filter(is_mentioned) {
+                    return HandleResult::Ok;
+                }
+            }
+
             info!(
-                "slack: message from {} in {}: {} chars",
+                "slack: message from {} in {}: {} chars{}",
                 user_id,
                 channel_id,
-                text.len()
+                text.len(),
+                if is_group { " (group)" } else { "" },
             );
 
             // Spawn message processing with streaming
@@ -375,6 +425,7 @@ async fn handle_socket_event(
                         cb_user.clone(),
                         cb_user,
                         cb_text,
+                        is_group,
                         Some(delta_tx),
                     )
                     .await
@@ -479,12 +530,27 @@ mod tests {
 
     #[test]
     fn channel_type_is_slack() {
-        let on_msg: SlackOnMessageFn = Arc::new(|_ch, _uid, _user, _text, _delta_tx| {
+        let on_msg: SlackOnMessageFn = Arc::new(|_ch, _uid, _user, _text, _is_group, _delta_tx| {
             Box::pin(async { Ok("test".to_string()) })
         });
         let channel = SlackChannel::new("xoxb-fake".to_string(), "xapp-fake".to_string(), on_msg);
         assert_eq!(channel.channel_type(), "slack");
         assert_eq!(channel.display_name(), "Slack");
         assert_eq!(channel.status(), ChannelStatus::Disconnected);
+    }
+
+    #[test]
+    fn slack_group_filter_blocks_unmentioned() {
+        let filter: SlackGroupFilter = Arc::new(|mentioned| mentioned);
+        assert!(!filter(false));
+        assert!(filter(true));
+    }
+
+    #[test]
+    fn slack_dm_channel_detection() {
+        // Slack DM channel IDs start with 'D'
+        assert!(!("D12345".starts_with('D') == false));
+        assert!(!"C12345".starts_with('D'));
+        assert!(!"G12345".starts_with('D'));
     }
 }

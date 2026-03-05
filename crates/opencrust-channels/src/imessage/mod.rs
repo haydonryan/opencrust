@@ -13,9 +13,14 @@ use tracing::{error, info, warn};
 use crate::traits::{ChannelLifecycle, ChannelSender, ChannelStatus};
 use opencrust_common::{Message, MessageContent, Result};
 
+/// Group filter closure for iMessage channels.
+/// Argument: `is_mentioned` (always `false` - iMessage has no mention concept).
+/// Returns `true` if the message should be processed.
+pub type IMessageGroupFilter = Arc<dyn Fn(bool) -> bool + Send + Sync>;
+
 /// Callback invoked when the bot receives a text message from iMessage.
 ///
-/// Arguments: `(sender_id, sender_id_as_name, text, delta_tx)`.
+/// Arguments: `(session_key, sender_id, text, is_group, delta_tx)`.
 /// `delta_tx` is always `None` for iMessage (no streaming support).
 /// Return `Err("__blocked__")` to silently drop the message (unauthorized user).
 pub type IMessageOnMessageFn = Arc<
@@ -23,6 +28,7 @@ pub type IMessageOnMessageFn = Arc<
             String,
             String,
             String,
+            bool,
             Option<mpsc::Sender<String>>,
         ) -> Pin<Box<dyn Future<Output = std::result::Result<String, String>> + Send>>
         + Send
@@ -36,15 +42,25 @@ pub struct IMessageChannel {
     poll_interval: Duration,
     status: ChannelStatus,
     on_message: IMessageOnMessageFn,
+    group_filter: IMessageGroupFilter,
     shutdown_tx: Option<watch::Sender<bool>>,
 }
 
 impl IMessageChannel {
     pub fn new(poll_interval_secs: u64, on_message: IMessageOnMessageFn) -> Self {
+        Self::with_group_filter(poll_interval_secs, on_message, Arc::new(|_| true))
+    }
+
+    pub fn with_group_filter(
+        poll_interval_secs: u64,
+        on_message: IMessageOnMessageFn,
+        group_filter: IMessageGroupFilter,
+    ) -> Self {
         Self {
             poll_interval: Duration::from_secs(poll_interval_secs),
             status: ChannelStatus::Disconnected,
             on_message,
+            group_filter,
             shutdown_tx: None,
         }
     }
@@ -84,6 +100,7 @@ impl ChannelLifecycle for IMessageChannel {
         self.shutdown_tx = Some(shutdown_tx);
 
         let on_message = Arc::clone(&self.on_message);
+        let group_filter = Arc::clone(&self.group_filter);
         let poll_interval = self.poll_interval;
 
         tokio::spawn(async move {
@@ -129,6 +146,11 @@ impl ChannelLifecycle for IMessageChannel {
                                 format!("imessage-{}", msg.sender)
                             };
 
+                            // Apply group filter (no mention detection for iMessage)
+                            if is_group && !group_filter(false) {
+                                continue;
+                            }
+
                             info!(
                                 "imessage from {} ({} chars, rowid={}{}) session={}",
                                 msg.sender,
@@ -157,7 +179,8 @@ impl ChannelLifecycle for IMessageChannel {
                                 };
 
                                 let result =
-                                    on_message(session_key, sender.clone(), text, None).await;
+                                    on_message(session_key, sender.clone(), text, is_group, None)
+                                        .await;
 
                                 match result {
                                     Ok(response) => {
@@ -272,12 +295,19 @@ mod tests {
 
     #[test]
     fn channel_type_is_imessage() {
-        let on_msg: IMessageOnMessageFn =
-            Arc::new(|_from, _user, _text, _delta_tx| Box::pin(async { Ok("test".to_string()) }));
+        let on_msg: IMessageOnMessageFn = Arc::new(|_from, _user, _text, _is_group, _delta_tx| {
+            Box::pin(async { Ok("test".to_string()) })
+        });
         let channel = IMessageChannel::new(2, on_msg);
         assert_eq!(channel.channel_type(), "imessage");
         assert_eq!(channel.display_name(), "iMessage");
         assert_eq!(channel.status(), ChannelStatus::Disconnected);
+    }
+
+    #[test]
+    fn imessage_group_filter_blocks() {
+        let filter: IMessageGroupFilter = Arc::new(|_mentioned| false);
+        assert!(!filter(false));
     }
 
     #[test]
