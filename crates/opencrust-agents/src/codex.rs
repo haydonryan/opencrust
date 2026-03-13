@@ -113,10 +113,9 @@ impl CodexProvider {
             )));
         }
 
-        let refresh = response
-            .json::<RefreshResponse>()
-            .await
-            .map_err(|e| Error::Agent(format!("failed to parse codex token refresh response: {e}")))?;
+        let refresh = response.json::<RefreshResponse>().await.map_err(|e| {
+            Error::Agent(format!("failed to parse codex token refresh response: {e}"))
+        })?;
 
         let claims = refresh
             .id_token
@@ -176,7 +175,9 @@ impl CodexProvider {
             auth = self.refresh_access_token().await?;
         }
 
-        Err(Error::Agent("codex request failed after refresh retry".to_string()))
+        Err(Error::Agent(
+            "codex request failed after refresh retry".to_string(),
+        ))
     }
 
     fn build_request(&self, request: &LlmRequest, stream: bool) -> Value {
@@ -259,7 +260,11 @@ impl CodexProvider {
                 for part in parts {
                     match part {
                         ContentBlock::Text { text } => content.push(output_text(text)),
-                        ContentBlock::ToolUse { id, name, input: args } => {
+                        ContentBlock::ToolUse {
+                            id,
+                            name,
+                            input: args,
+                        } => {
                             input.push(serde_json::json!({
                                 "type": "function_call",
                                 "call_id": id,
@@ -291,7 +296,11 @@ impl CodexProvider {
         })
     }
 
-    fn response_from_stream_events(&self, request: &LlmRequest, events: &[StreamEvent]) -> LlmResponse {
+    fn response_from_stream_events(
+        &self,
+        request: &LlmRequest,
+        events: &[StreamEvent],
+    ) -> LlmResponse {
         let model = if request.model.trim().is_empty() {
             self.model.clone()
         } else {
@@ -619,11 +628,7 @@ fn parse_sse_events(bytes: &[u8]) -> Result<Vec<StreamEvent>> {
                             .unwrap_or("{}")
                             .to_string();
                         if !id.is_empty() && !name.is_empty() {
-                            out.push(StreamEvent::ToolUseStart {
-                                index: 0,
-                                id,
-                                name,
-                            });
+                            out.push(StreamEvent::ToolUseStart { index: 0, id, name });
                             out.push(StreamEvent::InputJsonDelta(arguments));
                             out.push(StreamEvent::ContentBlockStop { index: 0 });
                         }

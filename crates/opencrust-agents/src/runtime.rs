@@ -107,7 +107,10 @@ impl AgentRuntime {
             }
         }
         let mut providers = self.providers.write().unwrap();
-        if let Some(slot) = providers.iter_mut().find(|existing| existing.provider_id() == id) {
+        if let Some(slot) = providers
+            .iter_mut()
+            .find(|existing| existing.provider_id() == id)
+        {
             *slot = provider;
             return;
         }

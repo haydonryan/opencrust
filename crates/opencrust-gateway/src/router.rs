@@ -99,8 +99,14 @@ pub fn build_router(
         .route("/api/sessions/{id}/messages", post(api::send_message))
         .route("/api/sessions/{id}/history", get(api::session_history))
         .route("/api/providers", get(list_providers).post(add_provider))
-        .route("/api/providers/codex/oauth/start", get(start_codex_provider_oauth))
-        .route("/api/providers/codex/oauth/callback", get(handle_codex_provider_oauth_callback))
+        .route(
+            "/api/providers/codex/oauth/start",
+            get(start_codex_provider_oauth),
+        )
+        .route(
+            "/api/providers/codex/oauth/callback",
+            get(handle_codex_provider_oauth_callback),
+        )
         .route(
             "/api/providers/codex/oauth/complete",
             post(complete_codex_provider_oauth),
@@ -702,9 +708,7 @@ async fn complete_codex_oauth(
     };
 
     let claims = parse_codex_id_token_claims(&token_response.id_token).ok();
-    let account_id = claims
-        .as_ref()
-        .and_then(|claims| claims.account_id.clone());
+    let account_id = claims.as_ref().and_then(|claims| claims.account_id.clone());
     let email = claims.as_ref().and_then(|claims| claims.email.clone());
 
     persist_secret("CODEX_ACCESS_TOKEN", &token_response.access_token);
@@ -1296,19 +1300,29 @@ async fn add_provider(
             persist_api_key("OPENAI_API_KEY", key);
         }
         "codex" => {
-            let access_token = body.api_key.clone().or_else(|| {
-                crate::bootstrap::default_vault_path().and_then(|vault_path| {
-                    opencrust_security::try_vault_get(&vault_path, "CODEX_ACCESS_TOKEN")
+            let access_token = body
+                .api_key
+                .clone()
+                .or_else(|| {
+                    crate::bootstrap::default_vault_path().and_then(|vault_path| {
+                        opencrust_security::try_vault_get(&vault_path, "CODEX_ACCESS_TOKEN")
+                    })
                 })
-            }).or_else(|| std::env::var("CODEX_ACCESS_TOKEN").ok());
+                .or_else(|| std::env::var("CODEX_ACCESS_TOKEN").ok());
             let refresh_token = crate::bootstrap::default_vault_path()
-                .and_then(|vault_path| opencrust_security::try_vault_get(&vault_path, "CODEX_REFRESH_TOKEN"))
+                .and_then(|vault_path| {
+                    opencrust_security::try_vault_get(&vault_path, "CODEX_REFRESH_TOKEN")
+                })
                 .or_else(|| std::env::var("CODEX_REFRESH_TOKEN").ok());
             let account_id = crate::bootstrap::default_vault_path()
-                .and_then(|vault_path| opencrust_security::try_vault_get(&vault_path, "CODEX_ACCOUNT_ID"))
+                .and_then(|vault_path| {
+                    opencrust_security::try_vault_get(&vault_path, "CODEX_ACCOUNT_ID")
+                })
                 .or_else(|| std::env::var("CODEX_ACCOUNT_ID").ok());
             let id_token = crate::bootstrap::default_vault_path()
-                .and_then(|vault_path| opencrust_security::try_vault_get(&vault_path, "CODEX_ID_TOKEN"))
+                .and_then(|vault_path| {
+                    opencrust_security::try_vault_get(&vault_path, "CODEX_ID_TOKEN")
+                })
                 .or_else(|| std::env::var("CODEX_ID_TOKEN").ok());
 
             if access_token.is_none() && refresh_token.is_none() {
@@ -1613,10 +1627,10 @@ fn persist_api_key(vault_key: &str, value: &str) -> bool {
 }
 
 fn persist_secret(vault_key: &str, value: &str) -> bool {
-    if let Some(vault_path) = crate::bootstrap::default_vault_path() {
-        if opencrust_security::try_vault_set(&vault_path, vault_key, value) {
-            return true;
-        }
+    if let Some(vault_path) = crate::bootstrap::default_vault_path()
+        && opencrust_security::try_vault_set(&vault_path, vault_key, value)
+    {
+        return true;
     }
     if vault_key.starts_with("CODEX_") {
         return crate::bootstrap::persist_auth_json_secret(vault_key, value);
@@ -1741,7 +1755,11 @@ fn oauth_popup_result_with_event(
         .replace('<', "&lt;")
         .replace('>', "&gt;");
     let json_message = serde_json::to_string(message).unwrap_or_else(|_| "\"\"".to_string());
-    let title = if success { success_title } else { failure_title };
+    let title = if success {
+        success_title
+    } else {
+        failure_title
+    };
     let status = if success { "success" } else { "error" };
     let payload = if success { "true" } else { "false" };
     let target_origin_json =
@@ -1820,7 +1838,11 @@ fn oauth_popup_result(success: bool, message: &str) -> Html<String> {
     )
 }
 
-fn codex_oauth_popup_result(success: bool, message: &str, target_origin: Option<&str>) -> Html<String> {
+fn codex_oauth_popup_result(
+    success: bool,
+    message: &str,
+    target_origin: Option<&str>,
+) -> Html<String> {
     oauth_popup_result_with_event(
         success,
         message,

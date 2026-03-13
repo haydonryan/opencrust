@@ -53,7 +53,9 @@ pub(crate) fn persist_auth_json_secret(key: &str, value: &str) -> bool {
 
     let mut json = std::fs::read_to_string(&path)
         .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw).ok())
+        .and_then(|raw| {
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw).ok()
+        })
         .unwrap_or_default();
 
     if value.is_empty() {
@@ -101,7 +103,11 @@ pub(crate) fn resolve_api_key(
     std::env::var(env_var).ok()
 }
 
-fn resolve_secret(config_value: Option<&str>, vault_credential_key: &str, env_var: &str) -> Option<String> {
+fn resolve_secret(
+    config_value: Option<&str>,
+    vault_credential_key: &str,
+    env_var: &str,
+) -> Option<String> {
     if let Some(vault_path) = default_vault_path()
         && let Some(val) = opencrust_security::try_vault_get(&vault_path, vault_credential_key)
     {

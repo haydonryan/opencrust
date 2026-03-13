@@ -271,9 +271,10 @@ impl GatewayServer {
             match TcpListener::bind(loopback_addr).await {
                 Ok(listener) => {
                     info!("Codex OAuth callback listening on {}", loopback_addr);
-                    if let Err(err) = axum::serve(listener, build_codex_loopback_router(codex_loopback_state))
-                        .with_graceful_shutdown(shutdown_signal())
-                        .await
+                    if let Err(err) =
+                        axum::serve(listener, build_codex_loopback_router(codex_loopback_state))
+                            .with_graceful_shutdown(shutdown_signal())
+                            .await
                     {
                         warn!("Codex OAuth callback server failed: {err}");
                     }

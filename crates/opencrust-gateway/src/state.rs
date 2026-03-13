@@ -194,13 +194,15 @@ impl AppState {
         state: &str,
         max_age: Duration,
     ) -> Option<CodexOAuthState> {
-        self.codex_oauth_states.remove(state).and_then(|(_, value)| {
-            if value.created_at.elapsed() <= max_age {
-                Some(value)
-            } else {
-                None
-            }
-        })
+        self.codex_oauth_states
+            .remove(state)
+            .and_then(|(_, value)| {
+                if value.created_at.elapsed() <= max_age {
+                    Some(value)
+                } else {
+                    None
+                }
+            })
     }
 
     pub fn codex_oauth_target_origin(&self, state: &str) -> Option<String> {
