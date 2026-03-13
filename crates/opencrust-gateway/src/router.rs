@@ -1801,10 +1801,10 @@ fn persist_api_key(vault_key: &str, value: &str) -> bool {
 }
 
 fn persist_secret(vault_key: &str, value: &str) -> bool {
-    if let Some(vault_path) = crate::bootstrap::default_vault_path() {
-        if opencrust_security::try_vault_set(&vault_path, vault_key, value) {
-            return true;
-        }
+    if let Some(vault_path) = crate::bootstrap::default_vault_path()
+        && opencrust_security::try_vault_set(&vault_path, vault_key, value)
+    {
+        return true;
     }
     if vault_key.starts_with("CODEX_") {
         return crate::bootstrap::persist_auth_json_secret(vault_key, value);
