@@ -44,6 +44,3 @@ whatsapp-web = ["dep:dirs"]
 imessage = ["dep:rusqlite", "dep:dirs"]
 line = ["dep:axum", "dep:ring", "dep:base64"]
 
-[[example]]
-name = "line_test_server"
-required-features = ["line"]
