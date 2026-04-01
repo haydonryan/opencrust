@@ -448,6 +448,28 @@ impl SessionStore {
         Ok(tasks)
     }
 
+    /// Delete sessions that have been inactive for more than `inactive_days` days,
+    /// along with all their associated messages. Returns the number of sessions deleted.
+    pub fn cleanup_stale_sessions(&self, inactive_days: i64) -> Result<usize> {
+        let interval = format!("-{inactive_days} days");
+        self.conn
+            .execute(
+                "DELETE FROM messages WHERE session_id IN (
+                     SELECT id FROM sessions WHERE updated_at < datetime('now', ?1)
+                 )",
+                params![interval],
+            )
+            .map_err(|e| Error::Database(format!("failed to cleanup session messages: {e}")))?;
+        let deleted = self
+            .conn
+            .execute(
+                "DELETE FROM sessions WHERE updated_at < datetime('now', ?1)",
+                params![interval],
+            )
+            .map_err(|e| Error::Database(format!("failed to cleanup stale sessions: {e}")))?;
+        Ok(deleted)
+    }
+
     /// Delete completed, failed, and cancelled tasks older than `older_than_days`.
     /// Returns the number of deleted rows.
     pub fn cleanup_completed_tasks(&self, older_than_days: i64) -> Result<usize> {
@@ -1074,5 +1096,58 @@ mod tests {
 
         let deleted2 = store.cleanup_completed_tasks(7).unwrap();
         assert_eq!(deleted2, 0);
+    }
+
+    #[test]
+    fn cleanup_stale_sessions_deletes_inactive_sessions() {
+        let store = SessionStore::in_memory().expect("in-memory store should open");
+        store
+            .upsert_session("s1", "web", "u1", &serde_json::json!({}))
+            .unwrap();
+        store
+            .upsert_session("s2", "web", "u2", &serde_json::json!({}))
+            .unwrap();
+        // Add a message to s1 to verify cascade delete
+        store
+            .append_message(
+                "s1",
+                "user",
+                "hello",
+                chrono::Utc::now(),
+                &serde_json::json!({}),
+            )
+            .unwrap();
+
+        // Backdate s1 to 91 days ago so it qualifies for 90-day cleanup
+        store
+            .connection()
+            .execute(
+                "UPDATE sessions SET updated_at = datetime('now', '-91 days') WHERE id = 's1'",
+                [],
+            )
+            .unwrap();
+
+        let deleted = store.cleanup_stale_sessions(90).unwrap();
+        assert_eq!(deleted, 1); // s1 deleted, s2 kept
+
+        // Messages belonging to s1 should also be gone
+        let msg_count: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id = 's1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(msg_count, 0);
+
+        // s2 should still exist
+        let session_count: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM sessions WHERE id = 's2'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(session_count, 1);
     }
 }

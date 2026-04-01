@@ -172,6 +172,11 @@ impl GatewayServer {
                         Err(e) => tracing::error!("task cleanup failed: {e}"),
                         _ => {}
                     }
+                    match store.cleanup_stale_sessions(90) {
+                        Ok(n) if n > 0 => info!("cleaned up {n} stale sessions"),
+                        Err(e) => tracing::error!("session cleanup failed: {e}"),
+                        _ => {}
+                    }
                 }
             }
         });
