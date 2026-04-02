@@ -83,15 +83,15 @@ pub async fn line_webhook(
             .unwrap_or("")
             .to_string();
 
-        let source = event.get("source").cloned().unwrap_or_default();
+        let source = event.get("source");
         let source_type = source
-            .get("type")
+            .and_then(|v| v.get("type"))
             .and_then(|v| v.as_str())
             .unwrap_or("user");
         let is_group = source_type == "group" || source_type == "room";
 
         let user_id = source
-            .get("userId")
+            .and_then(|v| v.get("userId"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -99,8 +99,7 @@ pub async fn line_webhook(
         // For groups, use groupId/roomId as the display context; push still targets userId.
         let context_id = if is_group {
             source
-                .get("groupId")
-                .or_else(|| source.get("roomId"))
+                .and_then(|v| v.get("groupId").or_else(|| v.get("roomId")))
                 .and_then(|v| v.as_str())
                 .unwrap_or(&user_id)
                 .to_string()
