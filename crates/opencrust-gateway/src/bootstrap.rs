@@ -4,8 +4,9 @@ use std::sync::{Arc, Mutex};
 
 use opencrust_agents::tools::Tool;
 use opencrust_agents::{
-    AgentRuntime, AnthropicProvider, BashTool, ChatMessage, CohereEmbeddingProvider, FileReadTool,
-    FileWriteTool, McpManager, OllamaProvider, OpenAiProvider, WebFetchTool, WebSearchTool,
+    AgentRuntime, AnthropicProvider, BashTool, ChatMessage, CohereEmbeddingProvider, DocSearchTool,
+    FileReadTool, FileWriteTool, McpManager, OllamaProvider, OpenAiProvider, WebFetchTool,
+    WebSearchTool,
 };
 #[cfg(target_os = "macos")]
 use opencrust_channels::{IMessageChannel, IMessageGroupFilter, IMessageOnMessageFn};
@@ -472,6 +473,35 @@ pub fn build_agent_runtime(config: &AppConfig) -> AgentRuntime {
             }
             Err(e) => {
                 warn!("failed to open memory store: {e}");
+            }
+        }
+    }
+
+    // --- Document Search (RAG) ---
+    {
+        let data_dir = config
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| opencrust_config::ConfigLoader::default_config_dir().join("data"));
+        let memory_db_path = data_dir.join("memory.db");
+
+        if let Ok(doc_store) = opencrust_db::DocumentStore::open(&memory_db_path) {
+            let doc_store = Arc::new(doc_store);
+            // Check if there are any documents to search
+            let has_docs = doc_store
+                .list_documents()
+                .map(|d| !d.is_empty())
+                .unwrap_or(false);
+            if has_docs && let Some(embed) = runtime.embedding_provider() {
+                let embed_clone = embed.clone();
+                let embed_fn: opencrust_agents::tools::doc_search_tool::EmbedFn =
+                    Arc::new(move |text: &str| {
+                        let e = embed_clone.clone();
+                        let t = text.to_string();
+                        Box::pin(async move { e.embed_query(&t).await })
+                    });
+                runtime.register_tool(Box::new(DocSearchTool::new(doc_store, embed_fn)));
+                info!("doc_search tool registered (documents available for RAG)");
             }
         }
     }

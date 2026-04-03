@@ -1,8 +1,10 @@
+pub mod document_store;
 pub mod memory_store;
 pub mod migrations;
 pub mod session_store;
 pub mod vector_store;
 
+pub use document_store::{DocumentChunk, DocumentInfo, DocumentStore};
 pub use memory_store::{
     CompactionReport, MemoryEntry, MemoryProvider, MemoryRole, MemoryStore, NewMemoryEntry,
     RecallQuery, SessionContext,

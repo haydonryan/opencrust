@@ -170,6 +170,10 @@ impl AgentRuntime {
         self.embeddings.is_some()
     }
 
+    pub fn embedding_provider(&self) -> Option<Arc<dyn EmbeddingProvider>> {
+        self.embeddings.clone()
+    }
+
     pub async fn on_session_start(
         &self,
         session_id: &str,

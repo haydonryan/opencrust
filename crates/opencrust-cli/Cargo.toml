@@ -16,6 +16,7 @@ opencrust-gateway = { workspace = true }
 opencrust-channels = { workspace = true }
 opencrust-agents = { workspace = true, features = ["mcp"] }
 opencrust-db = { workspace = true }
+opencrust-media = { workspace = true }
 opencrust-plugins = { workspace = true, optional = true }
 opencrust-security = { workspace = true }
 opencrust-skills = { workspace = true }

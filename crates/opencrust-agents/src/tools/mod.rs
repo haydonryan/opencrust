@@ -1,4 +1,5 @@
 pub mod bash_tool;
+pub mod doc_search_tool;
 pub mod file_read_tool;
 pub mod file_write_tool;
 pub mod schedule;
@@ -6,6 +7,7 @@ pub mod web_fetch_tool;
 pub mod web_search_tool;
 
 pub use bash_tool::BashTool;
+pub use doc_search_tool::DocSearchTool;
 pub use file_read_tool::FileReadTool;
 pub use file_write_tool::FileWriteTool;
 pub use schedule::{CancelHeartbeat, ListHeartbeats, ScheduleHeartbeat};

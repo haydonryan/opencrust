@@ -39,3 +39,34 @@ pub const MEMORY_SCHEMA_V1: Migration = Migration {
     name: "memory_schema_v1",
     sql: MEMORY_SCHEMA_V1_SQL,
 };
+
+pub const DOCUMENT_SCHEMA_V1_SQL: &str = "
+CREATE TABLE IF NOT EXISTS documents (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    source_path TEXT,
+    mime_type TEXT,
+    chunk_count INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS document_chunks (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    embedding BLOB,
+    embedding_model TEXT,
+    embedding_dimensions INTEGER,
+    token_count INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_doc_chunks_document ON document_chunks(document_id, chunk_index);
+";
+
+pub const DOCUMENT_SCHEMA_V1: Migration = Migration {
+    version: 2,
+    name: "document_schema_v1",
+    sql: DOCUMENT_SCHEMA_V1_SQL,
+};

@@ -100,6 +100,12 @@ enum Commands {
         action: MigrateCommands,
     },
 
+    /// Manage ingested documents (RAG)
+    Doc {
+        #[command(subcommand)]
+        action: DocCommands,
+    },
+
     /// Run diagnostic checks on the current setup
     Doctor,
 
@@ -179,6 +185,53 @@ enum MigrateCommands {
         #[arg(long)]
         source: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum DocCommands {
+    /// Ingest a document for RAG search
+    Add {
+        /// File path or directory to ingest
+        path: String,
+    },
+    /// List ingested documents
+    List,
+    /// Remove an ingested document
+    Remove {
+        /// Document name to remove
+        name: String,
+    },
+}
+
+/// Build an embedding provider from config for document ingestion.
+fn build_embedding_provider(
+    config: &opencrust_config::AppConfig,
+) -> Option<Box<dyn opencrust_agents::EmbeddingProvider>> {
+    let embed_name = config.memory.embedding_provider.as_ref()?;
+    let embed_config = config.embeddings.get(embed_name)?;
+
+    match embed_config.provider.as_str() {
+        "cohere" => {
+            // Resolve API key: config -> vault -> env
+            let api_key = embed_config
+                .api_key
+                .clone()
+                .or_else(|| {
+                    let vault_path = opencrust_config::ConfigLoader::default_config_dir()
+                        .join("credentials")
+                        .join("vault.json");
+                    opencrust_security::try_vault_get(&vault_path, "COHERE_API_KEY")
+                })
+                .or_else(|| std::env::var("COHERE_API_KEY").ok())?;
+
+            Some(Box::new(opencrust_agents::CohereEmbeddingProvider::new(
+                api_key,
+                embed_config.model.clone(),
+                embed_config.base_url.clone(),
+            )))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(any(feature = "plugins", test))]
@@ -875,6 +928,152 @@ async fn async_main(
                     match migrate::migrate_openclaw(source.as_deref(), dry_run, &opencrust_dir) {
                         Ok(report) => report.print_summary(),
                         Err(e) => println!("migration failed: {}", e),
+                    }
+                }
+            }
+        }
+        Commands::Doc { action } => {
+            init_tracing(&cli.log_level);
+            let data_dir = config
+                .data_dir
+                .clone()
+                .or_else(|| dirs::home_dir().map(|h| h.join(".opencrust").join("data")))
+                .unwrap_or_else(|| ".opencrust/data".into());
+            std::fs::create_dir_all(&data_dir).ok();
+            let memory_db_path = data_dir.join("memory.db");
+
+            let doc_store = opencrust_db::DocumentStore::open(&memory_db_path)
+                .context("failed to open document store")?;
+
+            match action {
+                DocCommands::Add { path } => {
+                    let file_path = std::path::Path::new(&path);
+                    if !file_path.exists() {
+                        println!("File not found: {path}");
+                        return Ok(());
+                    }
+
+                    // Extract text
+                    let text = match opencrust_media::extract_text(file_path) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            println!("Failed to extract text: {e}");
+                            return Ok(());
+                        }
+                    };
+
+                    if text.trim().is_empty() {
+                        println!("No text content found in {path}");
+                        return Ok(());
+                    }
+
+                    let file_name = file_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.clone());
+
+                    // Check for duplicate
+                    if doc_store.get_document_by_name(&file_name)?.is_some() {
+                        println!(
+                            "Document '{file_name}' already ingested. Remove it first with `opencrust doc remove {file_name}`."
+                        );
+                        return Ok(());
+                    }
+
+                    let mime = opencrust_media::detect_mime_type(file_path);
+
+                    // Chunk the text
+                    let chunks = opencrust_media::chunk_text(
+                        &text,
+                        &opencrust_media::ChunkOptions::default(),
+                    );
+
+                    println!("Ingesting '{file_name}' ({} chunks)...", chunks.len());
+
+                    // Add document
+                    let doc_id = doc_store.add_document(&file_name, Some(&path), mime)?;
+
+                    // Build embedding provider if available
+                    let embedding_provider = build_embedding_provider(&config);
+
+                    // Add chunks with embeddings
+                    for chunk in &chunks {
+                        let embedding = if let Some(ref provider) = embedding_provider {
+                            match provider
+                                .embed_documents(std::slice::from_ref(&chunk.text))
+                                .await
+                            {
+                                Ok(mut vecs) if !vecs.is_empty() => Some(vecs.remove(0)),
+                                Ok(_) => None,
+                                Err(e) => {
+                                    if chunk.index == 0 {
+                                        println!(
+                                            "  Warning: embedding failed ({e}), storing without vectors."
+                                        );
+                                    }
+                                    None
+                                }
+                            }
+                        } else {
+                            if chunk.index == 0 {
+                                println!(
+                                    "  No embedding provider configured. Storing without vectors."
+                                );
+                                println!(
+                                    "  (Add an embeddings section to config.yml for semantic search.)"
+                                );
+                            }
+                            None
+                        };
+
+                        let model = embedding_provider.as_ref().map(|p| p.model().to_string());
+                        let dims = embedding.as_ref().map(|e| e.len());
+
+                        doc_store.add_chunk(
+                            &doc_id,
+                            chunk.index,
+                            &chunk.text,
+                            embedding.as_deref(),
+                            model.as_deref(),
+                            dims,
+                            Some(chunk.token_count),
+                        )?;
+                    }
+
+                    doc_store.update_chunk_count(&doc_id, chunks.len())?;
+
+                    let has_embeddings = embedding_provider.is_some();
+                    println!(
+                        "  Done. {} chunks stored{}.",
+                        chunks.len(),
+                        if has_embeddings {
+                            " with embeddings"
+                        } else {
+                            " (no embeddings)"
+                        }
+                    );
+                }
+                DocCommands::List => {
+                    let docs = doc_store.list_documents()?;
+                    if docs.is_empty() {
+                        println!(
+                            "No documents ingested. Use `opencrust doc add <file>` to ingest."
+                        );
+                    } else {
+                        println!("Ingested documents:");
+                        for doc in &docs {
+                            println!(
+                                "  {} - {} chunks, {} ({})",
+                                doc.name, doc.chunk_count, doc.mime_type, doc.created_at
+                            );
+                        }
+                    }
+                }
+                DocCommands::Remove { name } => {
+                    if doc_store.remove_document(&name)? {
+                        println!("Removed document '{name}' and all its chunks.");
+                    } else {
+                        println!("Document '{name}' not found.");
                     }
                 }
             }
