@@ -402,14 +402,13 @@ mod tests {
         let nonce = "abc123";
         let sig = sign(token, timestamp, nonce);
         // "follow" is an event type that is not dispatched to on_message.
-        let body = format!(
-            "<xml>\
+        let body = "<xml>\
                 <ToUserName><![CDATA[gh_account]]></ToUserName>\
                 <FromUserName><![CDATA[oOpenId123]]></FromUserName>\
                 <CreateTime>1234567890</CreateTime>\
                 <MsgType><![CDATA[follow]]></MsgType>\
             </xml>"
-        );
+            .to_string();
 
         let uri = format!("/wechat/webhook?signature={sig}&timestamp={timestamp}&nonce={nonce}");
         let resp = make_router(make_state(token))
@@ -435,8 +434,7 @@ mod tests {
         let timestamp = "1700000000";
         let nonce = "abc123";
         let sig = sign(token, timestamp, nonce);
-        let body = format!(
-            "<xml>\
+        let body = "<xml>\
                 <ToUserName><![CDATA[gh_account]]></ToUserName>\
                 <FromUserName><![CDATA[oOpenId123]]></FromUserName>\
                 <CreateTime>1234567890</CreateTime>\
@@ -445,7 +443,7 @@ mod tests {
                 <MediaId><![CDATA[media_abc]]></MediaId>\
                 <MsgId>1234567890</MsgId>\
             </xml>"
-        );
+            .to_string();
 
         let uri = format!("/wechat/webhook?signature={sig}&timestamp={timestamp}&nonce={nonce}");
         let resp = make_router(make_state(token))
@@ -473,8 +471,7 @@ mod tests {
         let timestamp = "1700000000";
         let nonce = "abc123";
         let sig = sign(token, timestamp, nonce);
-        let body = format!(
-            "<xml>\
+        let body = "<xml>\
                 <ToUserName><![CDATA[gh_account]]></ToUserName>\
                 <FromUserName><![CDATA[oOpenId123]]></FromUserName>\
                 <CreateTime>1234567890</CreateTime>\
@@ -483,7 +480,7 @@ mod tests {
                 <Format><![CDATA[amr]]></Format>\
                 <MsgId>1234567890</MsgId>\
             </xml>"
-        );
+            .to_string();
 
         let uri = format!("/wechat/webhook?signature={sig}&timestamp={timestamp}&nonce={nonce}");
         let resp = make_router(make_state(token))
@@ -510,8 +507,7 @@ mod tests {
         let timestamp = "1700000000";
         let nonce = "abc123";
         let sig = sign(token, timestamp, nonce);
-        let body = format!(
-            "<xml>\
+        let body = "<xml>\
                 <ToUserName><![CDATA[gh_account]]></ToUserName>\
                 <FromUserName><![CDATA[oOpenId123]]></FromUserName>\
                 <CreateTime>1234567890</CreateTime>\
@@ -522,7 +518,7 @@ mod tests {
                 <Label><![CDATA[Bangkok]]></Label>\
                 <MsgId>1234567890</MsgId>\
             </xml>"
-        );
+            .to_string();
 
         let uri = format!("/wechat/webhook?signature={sig}&timestamp={timestamp}&nonce={nonce}");
         let resp = make_router(make_state(token))
