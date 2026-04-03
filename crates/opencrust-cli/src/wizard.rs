@@ -28,6 +28,9 @@ struct DetectedKeys {
     whatsapp_access_token: Option<String>,
     line_channel_secret: Option<String>,
     line_channel_access_token: Option<String>,
+    wechat_appid: Option<String>,
+    wechat_secret: Option<String>,
+    wechat_token: Option<String>,
 }
 
 impl DetectedKeys {
@@ -43,6 +46,7 @@ impl DetectedKeys {
             || self.slack_bot_token.is_some()
             || self.whatsapp_access_token.is_some()
             || self.line_channel_access_token.is_some()
+            || self.wechat_appid.is_some()
     }
 
     /// Pick the best provider based on detected keys (Anthropic > OpenAI > Sansa).
@@ -96,6 +100,9 @@ fn detect_env_keys() -> DetectedKeys {
         whatsapp_access_token: get("WHATSAPP_ACCESS_TOKEN"),
         line_channel_secret: get("LINE_CHANNEL_SECRET"),
         line_channel_access_token: get("LINE_CHANNEL_ACCESS_TOKEN"),
+        wechat_appid: get("WECHAT_APPID"),
+        wechat_secret: get("WECHAT_SECRET"),
+        wechat_token: get("WECHAT_TOKEN"),
     }
 }
 
@@ -670,8 +677,8 @@ async fn section_channels(
     }
 
     // Build channel list with pre-selection for detected env vars or existing config
-    let channel_names = ["Telegram", "Discord", "Slack", "WhatsApp", "LINE"];
-    let mut defaults = vec![false; 5];
+    let channel_names = ["Telegram", "Discord", "Slack", "WhatsApp", "LINE", "WeChat"];
+    let mut defaults = vec![false; 6];
 
     // Pre-check channels with detected tokens or existing config
     if detected.telegram_bot_token.is_some() || existing_channels.contains_key("telegram") {
@@ -688,6 +695,9 @@ async fn section_channels(
     }
     if detected.line_channel_access_token.is_some() || existing_channels.contains_key("line-bot") {
         defaults[4] = true;
+    }
+    if detected.wechat_appid.is_some() || existing_channels.contains_key("wechat") {
+        defaults[5] = true;
     }
 
     let selections = MultiSelect::new()
@@ -828,6 +838,36 @@ async fn section_channels(
                     channels.insert("line-bot".to_string(), cfg);
                 }
             }
+            5 => {
+                // WeChat
+                let existing_appid = channels
+                    .get("wechat")
+                    .and_then(|c| c.settings.get("appid"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let existing_secret = channels
+                    .get("wechat")
+                    .and_then(|c| c.settings.get("secret"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let existing_token = channels
+                    .get("wechat")
+                    .and_then(|c| c.settings.get("token"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if let Some(cfg) = setup_wechat(
+                    existing_appid.as_deref(),
+                    existing_secret.as_deref(),
+                    existing_token.as_deref(),
+                    detected.wechat_appid.as_deref(),
+                    detected.wechat_secret.as_deref(),
+                    detected.wechat_token.as_deref(),
+                )
+                .await?
+                {
+                    channels.insert("wechat".to_string(), cfg);
+                }
+            }
             _ => {}
         }
     }
@@ -841,10 +881,13 @@ async fn section_channels(
             2 => "slack",
             3 => "whatsapp",
             4 => "line-bot",
+            5 => "wechat",
             _ => "",
         })
         .collect();
-    let known = ["telegram", "discord", "slack", "whatsapp", "line-bot"];
+    let known = [
+        "telegram", "discord", "slack", "whatsapp", "line-bot", "wechat",
+    ];
     for name in &known {
         if !selected_names.contains(name) {
             channels.remove(*name);
@@ -1220,6 +1263,70 @@ async fn setup_line(
     }))
 }
 
+async fn setup_wechat(
+    existing_appid: Option<&str>,
+    existing_secret: Option<&str>,
+    existing_token: Option<&str>,
+    env_appid: Option<&str>,
+    env_secret: Option<&str>,
+    env_token: Option<&str>,
+) -> Result<Option<ChannelConfig>> {
+    println!();
+    println!("  WeChat Official Account Setup");
+    println!("  1. Go to https://mp.weixin.qq.com and open your Official Account");
+    println!("  2. Under 'Basic Configuration', copy the AppID and AppSecret");
+    println!("  3. Set a Token (any string) for webhook signature verification");
+    println!("  4. Set the webhook URL to: https://<your-host>/webhooks/wechat");
+    println!();
+
+    let appid = prompt_token_with_source("AppID", existing_appid, env_appid, "WECHAT_APPID")?;
+
+    if appid.is_empty() {
+        println!("  Skipping WeChat (no AppID provided).");
+        return Ok(None);
+    }
+
+    let secret =
+        prompt_token_with_source("AppSecret", existing_secret, env_secret, "WECHAT_SECRET")?;
+
+    if secret.is_empty() {
+        println!("  Skipping WeChat (no AppSecret provided).");
+        return Ok(None);
+    }
+
+    let token =
+        prompt_token_with_source("Webhook Token", existing_token, env_token, "WECHAT_TOKEN")?;
+
+    if token.is_empty() {
+        println!("  Skipping WeChat (no webhook token provided).");
+        return Ok(None);
+    }
+
+    let group_policy_choices = &["open (respond to all messages)", "disabled"];
+    let group_idx = Select::new()
+        .with_prompt("Message policy")
+        .items(group_policy_choices)
+        .default(0)
+        .interact()
+        .context("selection cancelled")?;
+    let group_policy = match group_idx {
+        1 => "disabled",
+        _ => "open",
+    };
+
+    let mut settings = HashMap::new();
+    settings.insert("appid".to_string(), serde_json::json!(appid));
+    settings.insert("secret".to_string(), serde_json::json!(secret));
+    settings.insert("token".to_string(), serde_json::json!(token));
+    settings.insert("group_policy".to_string(), serde_json::json!(group_policy));
+
+    Ok(Some(ChannelConfig {
+        channel_type: "wechat".to_string(),
+        enabled: Some(true),
+        settings,
+    }))
+}
+
 /// Prompt for a token, showing the source if detected from env or existing config.
 /// Returns the token string (may be empty if user skips).
 fn prompt_token_with_source(
@@ -1325,6 +1432,15 @@ pub async fn run_wizard(config_dir: &Path) -> Result<()> {
         }
         if detected.line_channel_secret.is_some() {
             println!("    Found LINE_CHANNEL_SECRET");
+        }
+        if detected.wechat_appid.is_some() {
+            println!("    Found WECHAT_APPID");
+        }
+        if detected.wechat_secret.is_some() {
+            println!("    Found WECHAT_SECRET");
+        }
+        if detected.wechat_token.is_some() {
+            println!("    Found WECHAT_TOKEN");
         }
         println!();
     }
