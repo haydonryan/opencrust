@@ -1,4 +1,5 @@
 mod banner;
+mod doctor;
 mod migrate;
 mod update;
 mod wizard;
@@ -97,6 +98,9 @@ enum Commands {
         #[command(subcommand)]
         action: MigrateCommands,
     },
+
+    /// Run diagnostic checks on the current setup
+    Doctor,
 
     /// Update to the latest release
     Update {
@@ -856,6 +860,13 @@ async fn async_main(
                         Err(e) => println!("migration failed: {}", e),
                     }
                 }
+            }
+        }
+        Commands::Doctor => {
+            init_tracing("error");
+            let passed = doctor::run_doctor(&config, config_loader.config_dir()).await?;
+            if !passed {
+                std::process::exit(1);
             }
         }
         Commands::Update { yes } => {
