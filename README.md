@@ -18,6 +18,11 @@
 </p>
 
 <p align="center">
+  🇺🇸 <strong>English</strong> &middot;
+  <a href="i18n/README.th.md">🇹🇭 Thai</a>
+</p>
+
+<p align="center">
   <a href="#quick-start">Quick Start</a> &middot;
   <a href="#why-opencrust">Why OpenCrust?</a> &middot;
   <a href="#features">Features</a> &middot;
