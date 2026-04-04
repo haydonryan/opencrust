@@ -12,12 +12,18 @@ use std::path::Path;
 /// - `.rs`, `.py`, `.js`, `.ts`, `.go`, `.java`, `.toml`, `.yaml`, `.yml` - read as-is (code)
 /// - `.html`, `.htm` - strip HTML tags
 /// - `.json` - pretty-print JSON
+/// - `.pdf` - extract text from PDF pages
 pub fn extract_text(path: &Path) -> Result<String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
+
+    // PDF is binary - handle before reading as text
+    if ext == "pdf" {
+        return extract_pdf_text(path);
+    }
 
     let raw = std::fs::read_to_string(path)
         .map_err(|e| Error::Media(format!("failed to read file {}: {}", path.display(), e)))?;
@@ -48,6 +54,30 @@ pub fn extract_text(path: &Path) -> Result<String> {
             ext
         ))),
     }
+}
+
+/// Extract text from a PDF file.
+fn extract_pdf_text(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| Error::Media(format!("failed to read PDF {}: {}", path.display(), e)))?;
+
+    let text = pdf_extract::extract_text_from_mem(&bytes).map_err(|e| {
+        Error::Media(format!(
+            "failed to extract text from PDF {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
+
+    let trimmed = text.trim().to_string();
+    if trimmed.is_empty() {
+        return Err(Error::Media(format!(
+            "PDF {} has no extractable text (may be a scanned/image-only PDF)",
+            path.display()
+        )));
+    }
+
+    Ok(trimmed)
 }
 
 /// Strip HTML tags from a string.
@@ -465,6 +495,15 @@ mod tests {
         let p = temp_file("main.rs", "fn main() {\n    println!(\"hi\");\n}");
         let text = extract_text(&p).unwrap();
         assert!(text.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_extract_pdf_invalid() {
+        let p = temp_file("bad.pdf", "not a real pdf");
+        let result = extract_text(&p);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("PDF") || err.contains("pdf"));
     }
 
     #[test]
