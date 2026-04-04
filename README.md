@@ -102,6 +102,9 @@ OpenCrust is built for the security requirements of always-on AI agents that acc
 - **Authentication by default** - WebSocket gateway requires pairing codes. No unauthenticated access out of the box.
 - **Per-channel authorization policies** - DM policies (open, pairing, allowlist) and group policies (open, mention-only, disabled) per channel. Unauthorized messages are silently dropped.
 - **Prompt injection detection** - input validation and sanitization before content reaches the LLM.
+- **Rate limiting** - per-user sliding-window rate limits with configurable cooldown to prevent abuse.
+- **Token budgets** - per-session, daily, and monthly token caps to control LLM cost per user.
+- **Tool allowlists** - restrict which tools an agent may call per session, with a per-session call budget cap.
 - **Log secret redaction** - API keys and tokens automatically redacted from log output.
 - **WASM sandboxing** - optional plugin sandbox via WebAssembly runtime with controlled host access (compile with `--features plugins`).
 - **Localhost-only binding** - gateway binds to `127.0.0.1` by default, not `0.0.0.0`.
@@ -226,6 +229,22 @@ agent:
   # Personality is configured via ~/.opencrust/dna.md (auto-created on first message)
   max_tokens: 4096
   max_context_tokens: 100000
+
+guardrails:
+  max_input_chars: 16000            # reject messages longer than this (default: 16000)
+  max_output_chars: 32000           # truncate responses longer than this (default: 32000)
+  token_budget_session: 10000       # max input+output tokens per session
+  token_budget_user_daily: 100000   # max tokens per user per day
+  token_budget_user_monthly: 500000 # max tokens per user per month
+  allowed_tools:                    # null = all tools allowed; [] = no tools allowed
+    - web_search
+    - file_read
+  session_tool_call_budget: 15      # max tool calls per session
+
+gateway:
+  rate_limit:
+    max_messages_per_minute: 10     # per-user message rate limit
+    cooldown_seconds: 30            # cooldown period after limit is exceeded
 
 memory:
   enabled: true

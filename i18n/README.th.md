@@ -103,6 +103,9 @@ OpenCrust ถูกออกแบบสำหรับ AI agent ที่ทำ
 - **User allowlist** - allowlist แยกตามช่องทางควบคุมว่าใครสามารถโต้ตอบกับ agent ได้ ข้อความที่ไม่ได้รับอนุญาตจะถูกละทิ้งโดยไม่แจ้ง
 - **Per-channel authorization policies** - DM policy (open, pairing, allowlist) และ group policy (open, mention-only, disabled) แยกตามช่องทาง ข้อความที่ไม่ได้รับอนุญาตจะถูกละทิ้งโดยไม่แจ้ง
 - **ตรวจจับ prompt injection** - ตรวจสอบและ sanitize input ก่อนส่งถึง LLM
+- **Rate limiting** - จำกัดจำนวน message ต่อผู้ใช้แบบ sliding-window พร้อม cooldown ป้องกันการใช้งานเกินขีดจำกัด
+- **Token budgets** - กำหนด token สูงสุดต่อ session, ต่อวัน และต่อเดือน เพื่อควบคุมต้นทุน LLM ต่อผู้ใช้
+- **Tool allowlists** - จำกัด tool ที่ agent เรียกใช้ได้ต่อ session พร้อมกำหนดจำนวนครั้งสูงสุด
 - **Log secret redaction** - API key และ token ถูก redact จาก log output อัตโนมัติ
 - **WASM sandboxing** - sandbox plugin แบบ optional ผ่าน WebAssembly runtime (compile ด้วย `--features plugins`)
 - **Bind เฉพาะ localhost** - gateway bind กับ `127.0.0.1` ค่าเริ่มต้น ไม่ใช่ `0.0.0.0`
@@ -225,6 +228,22 @@ agent:
   # Personality ตั้งค่าผ่าน ~/.opencrust/dna.md (สร้างอัตโนมัติเมื่อได้รับข้อความแรก)
   max_tokens: 4096
   max_context_tokens: 100000
+
+guardrails:
+  max_input_chars: 16000            # ปฏิเสธ message ที่ยาวเกิน (default: 16000)
+  max_output_chars: 32000           # ตัด response ที่ยาวเกิน (default: 32000)
+  token_budget_session: 10000       # tokens สูงสุดต่อ session
+  token_budget_user_daily: 100000   # tokens สูงสุดต่อผู้ใช้ต่อวัน
+  token_budget_user_monthly: 500000 # tokens สูงสุดต่อผู้ใช้ต่อเดือน
+  allowed_tools:                    # null = ทุก tool; [] = ห้ามใช้ tool
+    - web_search
+    - file_read
+  session_tool_call_budget: 15      # จำนวนครั้ง tool call สูงสุดต่อ session
+
+gateway:
+  rate_limit:
+    max_messages_per_minute: 10     # จำกัด message ต่อผู้ใช้ต่อนาที
+    cooldown_seconds: 30            # cooldown หลังเกินขีดจำกัด
 
 memory:
   enabled: true
