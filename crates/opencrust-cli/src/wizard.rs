@@ -4,7 +4,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use dialoguer::{Confirm, Input, MultiSelect, Password, Select};
-use opencrust_config::{AppConfig, ChannelConfig, LlmProviderConfig, McpServerConfig};
+use opencrust_config::{
+    AppConfig, ChannelConfig, EmbeddingProviderConfig, LlmProviderConfig, McpServerConfig,
+};
 use tracing::info;
 
 // ---------------------------------------------------------------------------
@@ -1657,6 +1659,10 @@ pub async fn run_wizard(config_dir: &Path) -> Result<()> {
     // --- Section 3: Tools ---
     let new_search_config = section_tools(&existing, &detected).await?;
 
+    // --- Section 4: Embeddings / RAG ---
+    let selected_provider = provider_result.as_ref().map(|p| p.provider.as_str());
+    let embedding_config = section_embeddings(selected_provider, config_dir).await?;
+
     // --- Build config ---
     let mut config = existing.unwrap_or_default();
 
@@ -1744,6 +1750,15 @@ pub async fn run_wizard(config_dir: &Path) -> Result<()> {
         config.tools.web_search = Some(search_cfg);
     }
 
+    // Apply embeddings
+    if let Some((embed_name, embed_config)) = &embedding_config {
+        config
+            .embeddings
+            .insert(embed_name.clone(), embed_config.clone());
+        config.memory.embedding_provider = Some(embed_name.clone());
+        config.memory.enabled = true;
+    }
+
     // Write config
     let config_path = config_dir.join("config.yml");
     let yaml = serde_yaml::to_string(&config).context("failed to serialize config")?;
@@ -1771,12 +1786,194 @@ pub async fn run_wizard(config_dir: &Path) -> Result<()> {
         println!("  Channels:  {}", names.join(", "));
     }
 
+    if let Some((name, cfg)) = &embedding_config {
+        let model = cfg.model.as_deref().unwrap_or("default");
+        println!("  Embeddings: {} ({model})", name);
+        println!("  RAG:        enabled - use `opencrust doc add <file>` to ingest documents");
+    }
+
     println!();
     println!("  Config written to {}", config_path.display());
     println!("  Run `opencrust start` to launch.");
     println!();
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Embeddings / RAG wizard section
+// ---------------------------------------------------------------------------
+
+/// Check if Ollama is running locally.
+async fn is_ollama_available() -> bool {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap_or_default();
+    client
+        .get("http://localhost:11434/api/tags")
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Pull an Ollama model, showing progress.
+async fn ollama_pull_model(model: &str) -> bool {
+    println!("  Pulling {model}...");
+    let output = tokio::process::Command::new("ollama")
+        .args(["pull", model])
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .await;
+    match output {
+        Ok(status) if status.success() => {
+            println!("  Done.");
+            true
+        }
+        _ => {
+            println!(
+                "  Warning: failed to pull {model}. You can pull it manually with `ollama pull {model}`."
+            );
+            false
+        }
+    }
+}
+
+/// Wizard section for configuring embeddings and RAG.
+async fn section_embeddings(
+    selected_llm_provider: Option<&str>,
+    config_dir: &Path,
+) -> Result<Option<(String, EmbeddingProviderConfig)>> {
+    println!();
+    println!("  -- Document Search (RAG) --");
+    println!();
+
+    let enable = Confirm::new()
+        .with_prompt("Enable document search? (lets the agent search your files)")
+        .default(true)
+        .interact()
+        .unwrap_or(false);
+
+    if !enable {
+        return Ok(None);
+    }
+
+    let ollama_available = is_ollama_available().await;
+    let using_ollama = selected_llm_provider == Some("ollama");
+
+    // If already using Ollama, default to Ollama embeddings
+    if using_ollama || ollama_available {
+        let use_ollama = if using_ollama {
+            println!("  Ollama detected - will use it for embeddings too.");
+            true
+        } else {
+            let choices = &[
+                "Ollama (local, free - already running)",
+                "Cohere (API, free tier 1000 calls/month)",
+                "Skip for now",
+            ];
+            let selection = Select::new()
+                .with_prompt("Embedding provider")
+                .items(choices)
+                .default(0)
+                .interact()
+                .context("selection cancelled")?;
+            match selection {
+                0 => true,
+                1 => {
+                    return setup_cohere_embeddings(config_dir).await;
+                }
+                _ => return Ok(None),
+            }
+        };
+
+        if use_ollama {
+            let model = "nomic-embed-text";
+            ollama_pull_model(model).await;
+
+            return Ok(Some((
+                "local".to_string(),
+                EmbeddingProviderConfig {
+                    provider: "ollama".to_string(),
+                    model: Some(model.to_string()),
+                    api_key: None,
+                    base_url: None,
+                    dimensions: None,
+                    extra: HashMap::new(),
+                },
+            )));
+        }
+    }
+
+    // No Ollama available - offer Cohere or skip
+    let choices = &["Cohere (API, free tier 1000 calls/month)", "Skip for now"];
+    let selection = Select::new()
+        .with_prompt("Embedding provider")
+        .items(choices)
+        .default(0)
+        .interact()
+        .context("selection cancelled")?;
+
+    if selection == 0 {
+        return setup_cohere_embeddings(config_dir).await;
+    }
+
+    Ok(None)
+}
+
+/// Set up Cohere embeddings with API key.
+async fn setup_cohere_embeddings(
+    config_dir: &Path,
+) -> Result<Option<(String, EmbeddingProviderConfig)>> {
+    // Check env first
+    let env_key = std::env::var("COHERE_API_KEY").ok();
+    let api_key = if let Some(ref key) = env_key {
+        println!("  Found COHERE_API_KEY in environment.");
+        key.clone()
+    } else {
+        println!();
+        println!("  Get a free API key at: https://dashboard.cohere.com/api-keys");
+        let key: String = Password::new()
+            .with_prompt("Cohere API key")
+            .interact()
+            .context("input cancelled")?;
+        if key.is_empty() {
+            println!("  Skipped.");
+            return Ok(None);
+        }
+
+        // Store in vault
+        let vault_path = config_dir.join("credentials").join("vault.json");
+        if opencrust_security::try_vault_set(&vault_path, "COHERE_API_KEY", &key) {
+            println!("  Stored in vault.");
+        }
+
+        key
+    };
+
+    // Quick health check
+    let provider =
+        opencrust_agents::CohereEmbeddingProvider::new(&api_key, None::<String>, None::<String>);
+    match opencrust_agents::EmbeddingProvider::health_check(&provider).await {
+        Ok(true) => println!("  Cohere connection verified."),
+        _ => {
+            println!("  Warning: could not verify Cohere connection. Config will be saved anyway.")
+        }
+    }
+
+    Ok(Some((
+        "cohere-main".to_string(),
+        EmbeddingProviderConfig {
+            provider: "cohere".to_string(),
+            model: Some("embed-english-v3.0".to_string()),
+            api_key: None, // resolved from vault or env at runtime
+            base_url: None,
+            dimensions: None,
+            extra: HashMap::new(),
+        },
+    )))
 }
 
 // ---------------------------------------------------------------------------
