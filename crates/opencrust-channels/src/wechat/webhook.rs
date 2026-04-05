@@ -241,9 +241,7 @@ pub async fn wechat_webhook(
             let ch = Arc::clone(&channel);
             let openid = from_user.clone();
             tokio::spawn(async move {
-                match api::get_access_token(ch.client(), ch.appid(), ch.secret(), ch.api_base_url())
-                    .await
-                {
+                match ch.get_cached_token().await {
                     Ok(token) => {
                         let _ = api::push(
                             ch.client(),
@@ -282,9 +280,7 @@ pub async fn wechat_webhook(
                         "Sorry, an error occurred.".to_string()
                     }
                 };
-                match api::get_access_token(ch.client(), ch.appid(), ch.secret(), ch.api_base_url())
-                    .await
-                {
+                match ch.get_cached_token().await {
                     Ok(token) => {
                         if let Err(e) =
                             api::push(ch.client(), &token, &openid, &reply, ch.api_base_url()).await
