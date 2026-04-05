@@ -1417,7 +1417,7 @@ pub fn build_telegram_channels(
                                     },
                                 );
                                 Ok(format!(
-                                    "Received {fname}. Say \"ingest\" to store it for future reference, or ask a question about it."
+                                    "Received {fname}. Say \"ingest\" to store it for future reference."
                                 ))
                             }
                         }
