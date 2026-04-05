@@ -459,6 +459,7 @@ impl AgentRuntime {
         } else {
             format!("{name}({input_snippet})")
         };
+        info!("[debug] {session_id}: {entry}");
         let mut acc = self
             .debug_accumulator
             .lock()
