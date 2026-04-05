@@ -392,6 +392,11 @@ pub struct VoiceConfig {
     #[serde(default)]
     pub api_key: Option<String>,
 
+    /// Base URL for a self-hosted Whisper STT server (e.g. `http://localhost:8000`).
+    /// When set, transcription is routed here instead of OpenAI/Groq and no API key is required.
+    #[serde(default)]
+    pub stt_base_url: Option<String>,
+
     /// When `true`, voice-message inputs receive a voice response.
     #[serde(default)]
     pub auto_reply_voice: bool,
@@ -405,6 +410,7 @@ impl Default for VoiceConfig {
             model: None,
             base_url: None,
             api_key: None,
+            stt_base_url: None,
             auto_reply_voice: false,
         }
     }

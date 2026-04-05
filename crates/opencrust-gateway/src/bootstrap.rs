@@ -993,13 +993,41 @@ pub fn build_discord_channels(
 
 /// Transcribe voice audio using the Whisper API.
 ///
-/// Tries OpenAI first, then Groq. Returns an error with a helpful message
-/// if neither API key is configured.
-async fn transcribe_voice(audio_bytes: &[u8]) -> std::result::Result<String, String> {
-    let openai_key = resolve_api_key(None, "OPENAI_API_KEY", "OPENAI_API_KEY");
-    let groq_key = resolve_api_key(None, "GROQ_API_KEY", "GROQ_API_KEY");
+/// Priority:
+/// 1. Local Whisper server (`stt_base_url` in config) — no API key required
+/// 2. `voice.api_key` from config (used for OpenAI)
+/// 3. `OPENAI_API_KEY` env var
+/// 4. `GROQ_API_KEY` env var
+async fn transcribe_voice(
+    audio_bytes: &[u8],
+    stt_base_url: Option<&str>,
+    config_api_key: Option<&str>,
+) -> std::result::Result<String, String> {
+    // 1. Local Whisper server — no API key needed
+    if let Some(base_url) = stt_base_url {
+        let endpoint = format!("{}/v1/audio/transcriptions", base_url.trim_end_matches('/'));
+        return whisper_transcribe(
+            audio_bytes,
+            "",
+            &endpoint,
+            "Systran/faster-whisper-large-v3",
+        )
+        .await;
+    }
 
-    if let Some(key) = openai_key {
+    // 2. API key from config
+    if let Some(key) = config_api_key {
+        return whisper_transcribe(
+            audio_bytes,
+            key,
+            "https://api.openai.com/v1/audio/transcriptions",
+            "whisper-1",
+        )
+        .await;
+    }
+
+    // 3. OpenAI env var
+    if let Some(key) = resolve_api_key(None, "OPENAI_API_KEY", "OPENAI_API_KEY") {
         return whisper_transcribe(
             audio_bytes,
             &key,
@@ -1009,7 +1037,8 @@ async fn transcribe_voice(audio_bytes: &[u8]) -> std::result::Result<String, Str
         .await;
     }
 
-    if let Some(key) = groq_key {
+    // 4. Groq env var
+    if let Some(key) = resolve_api_key(None, "GROQ_API_KEY", "GROQ_API_KEY") {
         return whisper_transcribe(
             audio_bytes,
             &key,
@@ -1019,8 +1048,10 @@ async fn transcribe_voice(audio_bytes: &[u8]) -> std::result::Result<String, Str
         .await;
     }
 
-    Err("Voice messages require an OpenAI or Groq API key. \
-         Groq offers free Whisper transcription at groq.com"
+    Err("Voice messages require a transcription source. Options:\n\
+         - Set voice.stt_base_url in config.yml for a local Whisper server\n\
+         - Set voice.api_key for OpenAI Whisper\n\
+         - Set GROQ_API_KEY env var for free Groq Whisper"
         .to_string())
 }
 
@@ -1041,10 +1072,11 @@ async fn whisper_transcribe(
         .part("file", file_part)
         .text("model", model.to_string());
 
-    let response = client
-        .post(endpoint)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .multipart(form)
+    let mut req = client.post(endpoint).multipart(form);
+    if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {api_key}"));
+    }
+    let response = req
         .send()
         .await
         .map_err(|e| format!("whisper request failed: {e}"))?;
@@ -1123,6 +1155,8 @@ pub fn build_telegram_channels(
         let guardrails_config = Arc::new(config.guardrails.clone());
         let auto_reply_voice = config.voice.auto_reply_voice;
         let tts_provider = state.tts_provider.clone();
+        let stt_base_url: Option<String> = config.voice.stt_base_url.clone();
+        let stt_api_key: Option<String> = config.voice.api_key.clone();
 
         let on_message: opencrust_channels::OnMessageFn = Arc::new(
             move |chat_id: i64,
@@ -1139,6 +1173,8 @@ pub fn build_telegram_channels(
                 let rate_limit_config = Arc::clone(&rate_limit_config);
                 let guardrails_config = Arc::clone(&guardrails_config);
                 let tts = tts_provider.clone();
+                let stt_base_url = stt_base_url.clone();
+                let stt_api_key = stt_api_key.clone();
                 Box::pin(async move {
                     // --- Command handling (text-only) ---
                     if let Some(cmd) = text.strip_prefix('/') {
@@ -1177,7 +1213,12 @@ pub fn build_telegram_channels(
                     // --- Handle media or text ---
                     match attachment {
                         Some(MediaAttachment::Voice { data, duration }) => {
-                            let transcript = transcribe_voice(&data).await?;
+                            let transcript = transcribe_voice(
+                                &data,
+                                stt_base_url.as_deref(),
+                                stt_api_key.as_deref(),
+                            )
+                            .await?;
                             info!(
                                 "telegram voice transcribed: {} chars from {}s audio",
                                 transcript.len(),
