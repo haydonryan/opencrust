@@ -177,3 +177,75 @@ pub async fn push_video(
 pub fn media_download_url(base_url: &str, media_id: &str, access_token: &str) -> String {
     format!("{base_url}/media/get?access_token={access_token}&media_id={media_id}")
 }
+
+/// Upload OGG/Opus audio bytes as a temporary voice media file.
+///
+/// Uses the WeChat media upload endpoint (`/media/upload?type=voice`).
+/// Returns the `media_id` (valid for 3 days) which can be used with
+/// [`push_voice_msg`] to deliver a voice message via the Customer Service API.
+pub async fn upload_voice(
+    client: &Client,
+    access_token: &str,
+    audio: &[u8],
+    base_url: &str,
+) -> Result<String, String> {
+    use reqwest::multipart;
+
+    let part = multipart::Part::bytes(audio.to_vec())
+        .file_name("voice.ogg")
+        .mime_str("audio/ogg")
+        .map_err(|e| format!("wechat: failed to build multipart part: {e}"))?;
+    let form = multipart::Form::new().part("media", part);
+
+    let resp = client
+        .post(format!(
+            "{base_url}/media/upload?access_token={access_token}&type=voice"
+        ))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("wechat media upload request failed: {e}"))?;
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        return Err(format!("wechat media upload error {status}: {body}"));
+    }
+
+    let json: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("wechat media upload parse error: {e}"))?;
+
+    if let Some(code) = json.get("errcode").and_then(|v| v.as_i64())
+        && code != 0
+    {
+        let msg = json
+            .get("errmsg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        return Err(format!("wechat media upload errcode={code}: {msg}"));
+    }
+
+    json.get("media_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "wechat media upload: missing media_id in response".to_string())
+}
+
+/// Push a voice message to a user via the Customer Service API.
+///
+/// `media_id` must be obtained from [`upload_voice`] first.
+pub async fn push_voice_msg(
+    client: &Client,
+    access_token: &str,
+    openid: &str,
+    media_id: &str,
+    base_url: &str,
+) -> Result<(), String> {
+    let body = serde_json::json!({
+        "touser": openid,
+        "msgtype": "voice",
+        "voice": { "media_id": media_id }
+    });
+    send_custom(client, access_token, base_url, body).await
+}

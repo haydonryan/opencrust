@@ -13,7 +13,7 @@ use ring::hmac;
 use tokio::sync::mpsc;
 use tracing::info;
 
-use crate::traits::{ChannelLifecycle, ChannelSender, ChannelStatus};
+use crate::traits::{ChannelLifecycle, ChannelResponse, ChannelSender, ChannelStatus};
 use opencrust_common::{Message, MessageContent, Result};
 
 /// Group filter closure for LINE channels.
@@ -33,7 +33,8 @@ pub type LineOnMessageFn = Arc<
             String,
             bool,
             Option<mpsc::Sender<String>>,
-        ) -> Pin<Box<dyn Future<Output = std::result::Result<String, String>> + Send>>
+        )
+            -> Pin<Box<dyn Future<Output = std::result::Result<ChannelResponse, String>> + Send>>
         + Send
         + Sync,
 >;
@@ -123,7 +124,7 @@ impl LineChannel {
         context_id: &str,
         text: &str,
         is_group: bool,
-    ) -> std::result::Result<String, String> {
+    ) -> std::result::Result<ChannelResponse, String> {
         (self.on_message)(
             user_id.to_string(),
             context_id.to_string(),
@@ -249,7 +250,7 @@ mod tests {
 
     fn make_on_msg() -> LineOnMessageFn {
         Arc::new(|_uid, _ctx, _text, _is_group, _delta_tx| {
-            Box::pin(async { Ok("test".to_string()) })
+            Box::pin(async { Ok(ChannelResponse::Text("test".to_string())) })
         })
     }
 

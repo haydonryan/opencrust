@@ -8,7 +8,7 @@ use serenity::all::{
 use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 
-use crate::traits::{ChannelEvent, ChannelStatus};
+use crate::traits::{ChannelEvent, ChannelResponse, ChannelStatus};
 
 use super::{DiscordGroupFilter, DiscordOnMessageFn, commands, convert};
 
@@ -128,11 +128,25 @@ impl DiscordHandler {
             .unwrap_or_else(|e| Err(format!("task panic: {e}")));
 
         match result {
-            Ok(final_text) => {
+            Ok(ChannelResponse::Text(final_text)) => {
                 if let Err(e) =
                     sync_discord_chunks(ctx, channel_id, &final_text, &mut sent, true).await
                 {
                     warn!("failed to send Discord final response: {e}");
+                }
+            }
+            Ok(ChannelResponse::Voice { text, audio }) => {
+                // Send OGG/Opus audio as a file attachment.
+                let attachment = serenity_model::CreateAttachment::bytes(audio, "voice.ogg");
+                let msg = CreateMessage::new().add_file(attachment);
+                if let Err(e) = channel_id.send_message(&ctx.http, msg).await {
+                    warn!("failed to send Discord voice attachment: {e}");
+                    // Fallback: send text
+                    if let Err(e2) =
+                        sync_discord_chunks(ctx, channel_id, &text, &mut sent, true).await
+                    {
+                        warn!("failed to send Discord voice fallback text: {e2}");
+                    }
                 }
             }
             Err(e) if e == "__blocked__" => {}
@@ -179,7 +193,7 @@ impl DiscordHandler {
         .await;
 
         let response_text = match result {
-            Ok(t) => t,
+            Ok(r) => r.text().to_string(),
             Err(e) if e == "__blocked__" => "You are not authorized to use this bot.".to_string(),
             Err(e) => format!("Sorry, an error occurred: {e}"),
         };
@@ -374,7 +388,7 @@ mod tests {
         let (tx, _rx) = broadcast::channel::<ChannelEvent>(16);
         let on_msg: DiscordOnMessageFn =
             Arc::new(|_ch, _uid, _user, _text, _is_group, _delta_tx| {
-                Box::pin(async { Ok("test".to_string()) })
+                Box::pin(async { Ok(ChannelResponse::Text("test".to_string())) })
             });
         let handler = DiscordHandler::new(
             tx,
@@ -392,7 +406,7 @@ mod tests {
         let (tx, _) = broadcast::channel::<ChannelEvent>(16);
         let on_msg: DiscordOnMessageFn =
             Arc::new(|_ch, _uid, _user, _text, _is_group, _delta_tx| {
-                Box::pin(async { Ok("test".to_string()) })
+                Box::pin(async { Ok(ChannelResponse::Text("test".to_string())) })
             });
         let handler = DiscordHandler::new(
             tx,

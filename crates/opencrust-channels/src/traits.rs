@@ -2,6 +2,32 @@ use async_trait::async_trait;
 use opencrust_common::{Message, Result};
 use serde::{Deserialize, Serialize};
 
+/// Unified response type returned by every channel's `OnMessageFn`.
+///
+/// Each channel handler decides how to deliver the variants:
+/// - `Text` — sent as a formatted chat message on all channels.
+/// - `Voice` — `text` is persisted to history; `audio` (OGG/Opus bytes) is
+///   delivered as a voice/audio message where the channel supports it.
+///   Channels that cannot deliver audio (e.g. Slack) fall back to sending
+///   the `text` field as a regular text message.
+#[derive(Debug, Clone)]
+pub enum ChannelResponse {
+    /// Plain text response.
+    Text(String),
+    /// Voice response: `text` for history/fallback, `audio` for playback.
+    Voice { text: String, audio: Vec<u8> },
+}
+
+impl ChannelResponse {
+    /// The text content regardless of variant (used for persistence and fallback).
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Text(t) => t,
+            Self::Voice { text, .. } => text,
+        }
+    }
+}
+
 /// Lifecycle management for a messaging channel (connect, disconnect, status).
 #[async_trait]
 pub trait ChannelLifecycle: Send {
@@ -57,4 +83,33 @@ pub enum ChannelEvent {
     MessageReceived(Message),
     StatusChanged(ChannelStatus),
     Error(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_variant_returns_text() {
+        let r = ChannelResponse::Text("hello".to_string());
+        assert_eq!(r.text(), "hello");
+    }
+
+    #[test]
+    fn voice_variant_returns_text_field() {
+        let r = ChannelResponse::Voice {
+            text: "spoken".to_string(),
+            audio: vec![0u8, 1, 2],
+        };
+        assert_eq!(r.text(), "spoken");
+    }
+
+    #[test]
+    fn voice_variant_text_independent_of_audio() {
+        let r = ChannelResponse::Voice {
+            text: "words".to_string(),
+            audio: vec![],
+        };
+        assert_eq!(r.text(), "words");
+    }
 }

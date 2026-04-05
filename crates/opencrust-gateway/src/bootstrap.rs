@@ -839,6 +839,12 @@ pub fn build_discord_channels(
         let max_output_chars = config.guardrails.max_output_chars;
         let rate_limit_config = Arc::new(config.gateway.rate_limit.clone());
         let guardrails_config = Arc::new(config.guardrails.clone());
+        let auto_reply_voice_discord = config.voice.auto_reply_voice;
+        let tts_provider_discord = state.tts_provider.clone();
+        let tts_max_chars_discord = config
+            .voice
+            .tts_max_chars
+            .unwrap_or(opencrust_media::TTS_DEFAULT_MAX_CHARS);
 
         let on_message: opencrust_channels::discord::DiscordOnMessageFn = Arc::new(
             move |channel_id: String,
@@ -853,6 +859,8 @@ pub fn build_discord_channels(
                 let policy = Arc::clone(&policy_for_cb);
                 let rate_limit_config = Arc::clone(&rate_limit_config);
                 let guardrails_config = Arc::clone(&guardrails_config);
+                let tts = tts_provider_discord.clone();
+                let tts_max_chars = tts_max_chars_discord;
                 Box::pin(async move {
                     if let Some(cmd) = text.strip_prefix('/') {
                         let cmd = cmd.split_whitespace().next().unwrap_or("");
@@ -865,7 +873,8 @@ pub fn build_discord_channels(
                             &pairing,
                             &policy,
                             &state,
-                        );
+                        )
+                        .map(ChannelResponse::Text);
                     }
 
                     // Groups already filtered by channel handler - skip auth for groups
@@ -875,7 +884,7 @@ pub fn build_discord_channels(
                             &policy, &mut list, &pairing, &user_id, &user_name, &text, "discord",
                         ) {
                             Ok(None) => {}
-                            Ok(Some(welcome)) => return Ok(welcome),
+                            Ok(Some(welcome)) => return Ok(ChannelResponse::Text(welcome)),
                             Err(e) => return Err(e),
                         }
                     }
@@ -967,7 +976,22 @@ pub fn build_discord_channels(
                             .await;
                     }
 
-                    Ok(response)
+                    // TTS: synthesize voice response if configured
+                    if auto_reply_voice_discord && let Some(ref provider) = tts {
+                        let tts_input = opencrust_media::truncate_for_tts(&response, tts_max_chars);
+                        match provider.synthesize(tts_input).await {
+                            Ok(audio) => {
+                                return Ok(ChannelResponse::Voice {
+                                    text: response,
+                                    audio,
+                                });
+                            }
+                            Err(e) => {
+                                warn!("tts synthesis failed, falling back to text: {e}");
+                            }
+                        }
+                    }
+                    Ok(ChannelResponse::Text(response))
                 })
             },
         );
@@ -1978,6 +2002,12 @@ pub fn build_slack_channels(
         let max_output_chars = config.guardrails.max_output_chars;
         let rate_limit_config = Arc::new(config.gateway.rate_limit.clone());
         let guardrails_config = Arc::new(config.guardrails.clone());
+        let auto_reply_voice_slack = config.voice.auto_reply_voice;
+        let tts_provider_slack = state.tts_provider.clone();
+        let tts_max_chars_slack = config
+            .voice
+            .tts_max_chars
+            .unwrap_or(opencrust_media::TTS_DEFAULT_MAX_CHARS);
 
         let on_message: SlackOnMessageFn = Arc::new(
             move |channel_id: String,
@@ -1992,6 +2022,8 @@ pub fn build_slack_channels(
                 let policy = Arc::clone(&policy_for_cb);
                 let rate_limit_config = Arc::clone(&rate_limit_config);
                 let guardrails_config = Arc::clone(&guardrails_config);
+                let tts = tts_provider_slack.clone();
+                let tts_max_chars = tts_max_chars_slack;
                 Box::pin(async move {
                     // Groups already filtered by channel handler - skip auth for groups
                     if !is_group {
@@ -2000,7 +2032,7 @@ pub fn build_slack_channels(
                             &policy, &mut list, &pairing, &user_id, &user_name, &text, "slack",
                         ) {
                             Ok(None) => {}
-                            Ok(Some(welcome)) => return Ok(welcome),
+                            Ok(Some(welcome)) => return Ok(ChannelResponse::Text(welcome)),
                             Err(e) => return Err(e),
                         }
                     }
@@ -2091,7 +2123,10 @@ pub fn build_slack_channels(
                             .await;
                     }
 
-                    Ok(response)
+                    // Slack has no native audio API — always return text.
+                    // TTS is not attempted to avoid wasted synthesis.
+                    let _ = (auto_reply_voice_slack, tts, tts_max_chars);
+                    Ok(ChannelResponse::Text(response))
                 })
             },
         );
@@ -2784,6 +2819,12 @@ pub fn build_line_channels(
         let max_output_chars = config.guardrails.max_output_chars;
         let rate_limit_config = Arc::new(config.gateway.rate_limit.clone());
         let guardrails_config = Arc::new(config.guardrails.clone());
+        let auto_reply_voice_line = config.voice.auto_reply_voice;
+        let tts_provider_line = state.tts_provider.clone();
+        let tts_max_chars_line = config
+            .voice
+            .tts_max_chars
+            .unwrap_or(opencrust_media::TTS_DEFAULT_MAX_CHARS);
 
         let on_message: LineOnMessageFn = Arc::new(
             move |user_id: String,
@@ -2797,6 +2838,8 @@ pub fn build_line_channels(
                 let policy = Arc::clone(&policy_for_cb);
                 let rate_limit_config = Arc::clone(&rate_limit_config);
                 let guardrails_config = Arc::clone(&guardrails_config);
+                let tts = tts_provider_line.clone();
+                let tts_max_chars = tts_max_chars_line;
                 Box::pin(async move {
                     if !is_group {
                         let mut list = allowlist.lock().unwrap();
@@ -2804,7 +2847,7 @@ pub fn build_line_channels(
                             &policy, &mut list, &pairing, &user_id, &user_id, &text, "line",
                         ) {
                             Ok(None) => {}
-                            Ok(Some(welcome)) => return Ok(welcome),
+                            Ok(Some(welcome)) => return Ok(ChannelResponse::Text(welcome)),
                             Err(e) => return Err(e),
                         }
                     }
@@ -2900,7 +2943,23 @@ pub fn build_line_channels(
                             .await;
                     }
 
-                    Ok(response)
+                    // TTS: synthesize voice response if configured.
+                    // LINE requires a CDN URL for audio; the channel handler falls back to text.
+                    if auto_reply_voice_line && let Some(ref provider) = tts {
+                        let tts_input = opencrust_media::truncate_for_tts(&response, tts_max_chars);
+                        match provider.synthesize(tts_input).await {
+                            Ok(audio) => {
+                                return Ok(ChannelResponse::Voice {
+                                    text: response,
+                                    audio,
+                                });
+                            }
+                            Err(e) => {
+                                warn!("tts synthesis failed, falling back to text: {e}");
+                            }
+                        }
+                    }
+                    Ok(ChannelResponse::Text(response))
                 })
             },
         );
@@ -2994,6 +3053,12 @@ pub fn build_wechat_channels(
         let max_output_chars = config.guardrails.max_output_chars;
         let rate_limit_config = Arc::new(config.gateway.rate_limit.clone());
         let guardrails_config = Arc::new(config.guardrails.clone());
+        let auto_reply_voice_wechat = config.voice.auto_reply_voice;
+        let tts_provider_wechat = state.tts_provider.clone();
+        let tts_max_chars_wechat = config
+            .voice
+            .tts_max_chars
+            .unwrap_or(opencrust_media::TTS_DEFAULT_MAX_CHARS);
 
         let on_message: WeChatOnMessageFn = Arc::new(
             move |user_id: String,
@@ -3007,6 +3072,8 @@ pub fn build_wechat_channels(
                 let policy = Arc::clone(&policy_for_cb);
                 let rate_limit_config = Arc::clone(&rate_limit_config);
                 let guardrails_config = Arc::clone(&guardrails_config);
+                let tts = tts_provider_wechat.clone();
+                let tts_max_chars = tts_max_chars_wechat;
                 Box::pin(async move {
                     {
                         let mut list = allowlist.lock().unwrap();
@@ -3014,7 +3081,7 @@ pub fn build_wechat_channels(
                             &policy, &mut list, &pairing, &user_id, &user_id, &text, "wechat",
                         ) {
                             Ok(None) => {}
-                            Ok(Some(welcome)) => return Ok(welcome),
+                            Ok(Some(welcome)) => return Ok(ChannelResponse::Text(welcome)),
                             Err(e) => return Err(e),
                         }
                     }
@@ -3105,7 +3172,23 @@ pub fn build_wechat_channels(
                             .await;
                     }
 
-                    Ok(response)
+                    // TTS: synthesize voice response if configured.
+                    // The WeChat channel handler uploads audio and sends a voice message.
+                    if auto_reply_voice_wechat && let Some(ref provider) = tts {
+                        let tts_input = opencrust_media::truncate_for_tts(&response, tts_max_chars);
+                        match provider.synthesize(tts_input).await {
+                            Ok(audio) => {
+                                return Ok(ChannelResponse::Voice {
+                                    text: response,
+                                    audio,
+                                });
+                            }
+                            Err(e) => {
+                                warn!("tts synthesis failed, falling back to text: {e}");
+                            }
+                        }
+                    }
+                    Ok(ChannelResponse::Text(response))
                 })
             },
         );

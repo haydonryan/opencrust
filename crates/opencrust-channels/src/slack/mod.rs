@@ -12,7 +12,7 @@ use reqwest::Client;
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
-use crate::traits::{ChannelLifecycle, ChannelSender, ChannelStatus};
+use crate::traits::{ChannelLifecycle, ChannelResponse, ChannelSender, ChannelStatus};
 use opencrust_common::{Message, MessageContent, Result};
 
 /// Group filter closure for Slack channels.
@@ -34,7 +34,8 @@ pub type SlackOnMessageFn = Arc<
             String,
             bool,
             Option<mpsc::Sender<String>>,
-        ) -> Pin<Box<dyn Future<Output = std::result::Result<String, String>> + Send>>
+        )
+            -> Pin<Box<dyn Future<Output = std::result::Result<ChannelResponse, String>> + Send>>
         + Send
         + Sync,
 >;
@@ -475,8 +476,9 @@ async fn handle_socket_event(
                     .unwrap_or_else(|e| Err(format!("task panic: {e}")));
 
                 match result {
-                    Ok(final_text) => {
-                        let formatted = fmt::to_slack_mrkdwn(&final_text);
+                    Ok(response) => {
+                        // Slack has no native audio API — Voice falls back to text.
+                        let formatted = fmt::to_slack_mrkdwn(response.text());
                         if let Some(ts) = &msg_ts {
                             let _ = api::update_message(
                                 &client,
@@ -531,7 +533,7 @@ mod tests {
     #[test]
     fn channel_type_is_slack() {
         let on_msg: SlackOnMessageFn = Arc::new(|_ch, _uid, _user, _text, _is_group, _delta_tx| {
-            Box::pin(async { Ok("test".to_string()) })
+            Box::pin(async { Ok(ChannelResponse::Text("test".to_string())) })
         });
         let channel = SlackChannel::new("xoxb-fake".to_string(), "xapp-fake".to_string(), on_msg);
         assert_eq!(channel.channel_type(), "slack");

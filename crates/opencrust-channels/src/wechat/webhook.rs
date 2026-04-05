@@ -14,6 +14,8 @@ use tracing::{info, warn};
 /// We use a 4-second budget to leave headroom for serialization.
 const WECHAT_SYNC_TIMEOUT: Duration = Duration::from_secs(4);
 
+use crate::traits::ChannelResponse;
+
 use super::WeChatChannel;
 use super::api;
 use super::fmt;
@@ -228,8 +230,46 @@ pub async fn wechat_webhook(
             let result = join_result.unwrap_or_else(|e| Err(format!("llm task panicked: {e}")));
             match result {
                 // Replied in time — send passive XML reply.
+                // WeChat passive reply only supports text; Voice falls back to text here
+                // and the audio is pushed asynchronously via Customer Service API.
                 Ok(response) => {
-                    let reply_text = fmt::to_wechat_text(&response);
+                    if let ChannelResponse::Voice { ref audio, .. } = response {
+                        // Passive XML can only carry text — push audio async.
+                        let ch2 = Arc::clone(&channel);
+                        let openid2 = from_user.clone();
+                        let audio2 = audio.clone();
+                        tokio::spawn(async move {
+                            match ch2.get_cached_token().await {
+                                Ok(token) => {
+                                    match api::upload_voice(
+                                        ch2.client(),
+                                        &token,
+                                        &audio2,
+                                        ch2.api_base_url(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(media_id) => {
+                                            if let Err(e) = api::push_voice_msg(
+                                                ch2.client(),
+                                                &token,
+                                                &openid2,
+                                                &media_id,
+                                                ch2.api_base_url(),
+                                            )
+                                            .await
+                                            {
+                                                warn!("wechat: async voice push failed: {e}");
+                                            }
+                                        }
+                                        Err(e) => warn!("wechat: voice upload failed: {e}"),
+                                    }
+                                }
+                                Err(e) => warn!("wechat: token fetch failed for voice push: {e}"),
+                            }
+                        });
+                    }
+                    let reply_text = fmt::to_wechat_text(response.text());
                     let reply_xml = fmt::build_reply_xml(&from_user, &to_user, &reply_text);
                     info!("wechat: sync reply sent to openid={from_user}");
                     (
@@ -286,15 +326,41 @@ pub async fn wechat_webhook(
                     Ok(r) => r,
                     Err(e) => Err(format!("llm task panicked: {e}")),
                 };
-                let reply = match result {
-                    Ok(r) => fmt::to_wechat_text(&r),
+                let response = match result {
+                    Ok(r) => r,
                     Err(e) => {
                         warn!("wechat: async LLM error for openid={openid}: {e}");
-                        "Sorry, an error occurred.".to_string()
+                        ChannelResponse::Text("Sorry, an error occurred.".to_string())
                     }
                 };
                 match ch.get_cached_token().await {
                     Ok(token) => {
+                        // For Voice: upload audio and push as voice message.
+                        if let ChannelResponse::Voice { ref audio, .. } = response {
+                            match api::upload_voice(ch.client(), &token, audio, ch.api_base_url())
+                                .await
+                            {
+                                Ok(media_id) => {
+                                    if let Err(e) = api::push_voice_msg(
+                                        ch.client(),
+                                        &token,
+                                        &openid,
+                                        &media_id,
+                                        ch.api_base_url(),
+                                    )
+                                    .await
+                                    {
+                                        warn!("wechat: async voice push failed: {e}");
+                                    } else {
+                                        info!("wechat: async voice push sent to openid={openid}");
+                                        return;
+                                    }
+                                }
+                                Err(e) => warn!("wechat: voice upload failed, sending text: {e}"),
+                            }
+                        }
+                        // Text path (or Voice fallback after upload failure).
+                        let reply = fmt::to_wechat_text(response.text());
                         if let Err(e) =
                             api::push(ch.client(), &token, &openid, &reply, ch.api_base_url())
                                 .await
@@ -317,6 +383,7 @@ pub async fn wechat_webhook(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::ChannelResponse;
     use crate::wechat::{WeChatChannel, WeChatOnMessageFn};
     use axum::body::Body;
     use axum::{
@@ -338,8 +405,9 @@ mod tests {
     }
 
     fn make_state(token: &str) -> WeChatWebhookState {
-        let on_msg: WeChatOnMessageFn =
-            Arc::new(|_uid, _ctx, _text, _is_group, _| Box::pin(async { Ok("reply".to_string()) }));
+        let on_msg: WeChatOnMessageFn = Arc::new(|_uid, _ctx, _text, _is_group, _| {
+            Box::pin(async { Ok(ChannelResponse::Text("reply".to_string())) })
+        });
         let ch = Arc::new(WeChatChannel::new(
             "appid".to_string(),
             "secret".to_string(),
@@ -673,7 +741,7 @@ mod tests {
         let on_msg: WeChatOnMessageFn = Arc::new(|_uid, _ctx, _text, _is_group, _| {
             Box::pin(async {
                 tokio::time::sleep(Duration::from_secs(10)).await;
-                Ok("late reply".to_string())
+                Ok(ChannelResponse::Text("late reply".to_string()))
             })
         });
         let ch = Arc::new(WeChatChannel::new(

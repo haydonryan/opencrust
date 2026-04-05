@@ -6,6 +6,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use tracing::{info, warn};
 
+use crate::traits::ChannelResponse;
+
 use super::LineChannel;
 use super::api;
 use super::fmt;
@@ -127,7 +129,14 @@ pub async fn line_webhook(
                 .await;
             match result {
                 Ok(response) => {
-                    let out = fmt::to_line_text(&response);
+                    // LINE audio messages require a publicly accessible HTTPS URL.
+                    // Until CDN upload support is added, Voice responses fall back to text.
+                    if matches!(response, ChannelResponse::Voice { .. }) {
+                        info!(
+                            "line: audio reply not yet supported (LINE requires CDN URL); sending text"
+                        );
+                    }
+                    let out = fmt::to_line_text(response.text());
                     // Try reply API first (free), fallback to push.
                     if !reply_token.is_empty() {
                         match api::reply(
@@ -204,10 +213,12 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::line::{LineChannel, LineOnMessageFn};
+    use crate::traits::ChannelResponse;
 
     fn make_state(secret: &str) -> LineWebhookState {
-        let on_msg: LineOnMessageFn =
-            Arc::new(|_uid, _ctx, _text, _is_group, _| Box::pin(async { Ok("reply".to_string()) }));
+        let on_msg: LineOnMessageFn = Arc::new(|_uid, _ctx, _text, _is_group, _| {
+            Box::pin(async { Ok(ChannelResponse::Text("reply".to_string())) })
+        });
         let ch = Arc::new(LineChannel::new(
             "tok".to_string(),
             secret.to_string(),
@@ -217,8 +228,9 @@ mod tests {
     }
 
     fn make_state_with_base_url(secret: &str, base_url: String) -> LineWebhookState {
-        let on_msg: LineOnMessageFn =
-            Arc::new(|_uid, _ctx, _text, _is_group, _| Box::pin(async { Ok("reply".to_string()) }));
+        let on_msg: LineOnMessageFn = Arc::new(|_uid, _ctx, _text, _is_group, _| {
+            Box::pin(async { Ok(ChannelResponse::Text("reply".to_string())) })
+        });
         let ch = Arc::new(
             LineChannel::new("tok".to_string(), secret.to_string(), on_msg)
                 .with_api_base_url(base_url),

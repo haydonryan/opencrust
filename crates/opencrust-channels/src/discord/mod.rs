@@ -19,7 +19,9 @@ use serenity::all::{self as serenity_model, CreateAttachment, CreateMessage};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info};
 
-use crate::traits::{ChannelEvent, ChannelLifecycle, ChannelSender, ChannelStatus};
+use crate::traits::{
+    ChannelEvent, ChannelLifecycle, ChannelResponse, ChannelSender, ChannelStatus,
+};
 use config::DiscordConfig;
 use handler::DiscordHandler;
 
@@ -40,7 +42,8 @@ pub type DiscordOnMessageFn = Arc<
             String,
             bool,
             Option<mpsc::Sender<String>>,
-        ) -> Pin<Box<dyn Future<Output = std::result::Result<String, String>> + Send>>
+        )
+            -> Pin<Box<dyn Future<Output = std::result::Result<ChannelResponse, String>> + Send>>
         + Send
         + Sync,
 >;
@@ -346,7 +349,7 @@ mod tests {
     fn new_channel_starts_disconnected() {
         let on_msg: DiscordOnMessageFn =
             Arc::new(|_ch, _uid, _user, _text, _is_group, _delta_tx| {
-                Box::pin(async { Ok("test".to_string()) })
+                Box::pin(async { Ok(ChannelResponse::Text("test".to_string())) })
             });
         let channel = DiscordChannel::new(test_config(), on_msg);
         assert_eq!(channel.status(), ChannelStatus::Disconnected);
@@ -356,7 +359,7 @@ mod tests {
     fn channel_type_returns_discord() {
         let on_msg: DiscordOnMessageFn =
             Arc::new(|_ch, _uid, _user, _text, _is_group, _delta_tx| {
-                Box::pin(async { Ok("test".to_string()) })
+                Box::pin(async { Ok(ChannelResponse::Text("test".to_string())) })
             });
         let channel = DiscordChannel::new(test_config(), on_msg);
         assert_eq!(channel.channel_type(), "discord");
@@ -366,7 +369,7 @@ mod tests {
     fn display_name_returns_discord() {
         let on_msg: DiscordOnMessageFn =
             Arc::new(|_ch, _uid, _user, _text, _is_group, _delta_tx| {
-                Box::pin(async { Ok("test".to_string()) })
+                Box::pin(async { Ok(ChannelResponse::Text("test".to_string())) })
             });
         let channel = DiscordChannel::new(test_config(), on_msg);
         assert_eq!(channel.display_name(), "Discord");
@@ -376,7 +379,7 @@ mod tests {
     fn subscribe_returns_receiver() {
         let on_msg: DiscordOnMessageFn =
             Arc::new(|_ch, _uid, _user, _text, _is_group, _delta_tx| {
-                Box::pin(async { Ok("test".to_string()) })
+                Box::pin(async { Ok(ChannelResponse::Text("test".to_string())) })
             });
         let channel = DiscordChannel::new(test_config(), on_msg);
         let _rx = channel.subscribe();
@@ -413,7 +416,7 @@ mod tests {
     async fn send_message_without_connection_fails() {
         let on_msg: DiscordOnMessageFn =
             Arc::new(|_ch, _uid, _user, _text, _is_group, _delta_tx| {
-                Box::pin(async { Ok("test".to_string()) })
+                Box::pin(async { Ok(ChannelResponse::Text("test".to_string())) })
             });
         let channel = DiscordChannel::new(test_config(), on_msg);
         let msg = opencrust_common::Message::text(

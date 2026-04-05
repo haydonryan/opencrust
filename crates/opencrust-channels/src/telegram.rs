@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::{error, info, warn};
 
 use crate::telegram_fmt::to_telegram_markdown;
-use crate::traits::{ChannelLifecycle, ChannelSender, ChannelStatus};
+use crate::traits::{ChannelLifecycle, ChannelResponse, ChannelSender, ChannelStatus};
 use opencrust_common::{Message, MessageContent, Result};
 
 /// Closure that decides whether to process a group message.
@@ -39,30 +39,6 @@ pub enum MediaAttachment {
         data: Vec<u8>,
         duration: u32,
     },
-}
-
-/// Response returned by the `on_message` callback.
-///
-/// `Text` is the normal case. `Voice` is returned when `auto_reply_voice` is
-/// enabled and a TTS provider is configured — the channel handler will send an
-/// audio message instead of (or in addition to) text.
-#[derive(Debug, Clone)]
-pub enum ChannelResponse {
-    /// Plain text response — sent as a formatted chat message.
-    Text(String),
-    /// Voice response — `text` is persisted to history; `audio` (OGG/Opus bytes)
-    /// is sent as a voice message to the user.
-    Voice { text: String, audio: Vec<u8> },
-}
-
-impl ChannelResponse {
-    /// The text content regardless of variant (used for persistence).
-    pub fn text(&self) -> &str {
-        match self {
-            Self::Text(t) => t,
-            Self::Voice { text, .. } => text,
-        }
-    }
 }
 
 /// Callback invoked when the bot receives a message.
