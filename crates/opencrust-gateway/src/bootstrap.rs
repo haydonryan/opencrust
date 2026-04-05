@@ -1484,30 +1484,6 @@ pub fn build_telegram_channels(
                                     }
                                 }
                             } else {
-                                state
-                                    .agents
-                                    .process_message_with_context_and_summary(
-                                        &session_id,
-                                        &text,
-                                        &history,
-                                        summary.as_deref(),
-                                        continuity_key.as_deref(),
-                                        Some(&user_id),
-                                    )
-                                    .await
-                            }
-                            .map_err(|e| e.to_string())?;
-
-                            if let Some(s) = new_summary {
-                                state.update_session_summary(&session_id, &s);
-                            }
-
-                            let response = opencrust_security::InputValidator::truncate_output(
-                                &response,
-                                max_output_chars,
-                            );
-                            state
-                                .persist_turn(
                                 // Store as pending and prompt
                                 state.set_pending_file(
                                     &session_id,
@@ -1521,7 +1497,6 @@ pub fn build_telegram_channels(
                                     "Received {fname}. Use /ingest to store it for future reference."
                                 ))
                             }
-                            Ok(response)
                         }
                         None => {
                             // Regular text-only path
