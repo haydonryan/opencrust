@@ -1303,6 +1303,10 @@ pub fn build_telegram_channels(
                                 state.update_session_summary(&session_id, &s);
                             }
 
+                            let response = opencrust_security::InputValidator::truncate_output(
+                                &response,
+                                max_output_chars,
+                            );
                             state
                                 .persist_turn(
                                     &session_id,
@@ -1320,18 +1324,29 @@ pub fn build_telegram_channels(
                                     .persist_usage(&session_id, &provider, &model, input, output)
                                     .await;
                             }
-                            let response = opencrust_security::InputValidator::truncate_output(
-                                &response,
-                                max_output_chars,
-                            );
                             Ok(response)
                         }
                         Some(MediaAttachment::Photo { data, caption }) => {
                             use base64::Engine;
                             let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
                             let data_url = format!("data:image/jpeg;base64,{b64}");
-                            let caption_text =
-                                caption.unwrap_or_else(|| "Describe this image.".to_string());
+                            let caption_text = opencrust_security::InputValidator::sanitize(
+                                &caption.unwrap_or_else(|| "Describe this image.".to_string()),
+                            );
+                            if opencrust_security::InputValidator::exceeds_length(
+                                &caption_text,
+                                max_input_chars,
+                            ) {
+                                return Err(format!(
+                                    "input rejected: message exceeds {max_input_chars} character limit"
+                                ));
+                            }
+                            if opencrust_security::InputValidator::check_prompt_injection(
+                                &caption_text,
+                            ) {
+                                return Err("input rejected: potential prompt injection detected"
+                                    .to_string());
+                            }
 
                             let blocks = vec![
                                 opencrust_agents::ContentBlock::Image { url: data_url },
@@ -1385,6 +1400,10 @@ pub fn build_telegram_channels(
                                 state.update_session_summary(&session_id, &s);
                             }
 
+                            let response = opencrust_security::InputValidator::truncate_output(
+                                &response,
+                                max_output_chars,
+                            );
                             state
                                 .persist_turn(
                                     &session_id,
@@ -1402,10 +1421,6 @@ pub fn build_telegram_channels(
                                     .persist_usage(&session_id, &provider, &model, input, output)
                                     .await;
                             }
-                            let response = opencrust_security::InputValidator::truncate_output(
-                                &response,
-                                max_output_chars,
-                            );
                             Ok(response)
                         }
                         Some(MediaAttachment::Document {
@@ -1542,6 +1557,10 @@ pub fn build_telegram_channels(
                                 state.update_session_summary(&session_id, &s);
                             }
 
+                            let response = opencrust_security::InputValidator::truncate_output(
+                                &response,
+                                max_output_chars,
+                            );
                             state
                                 .persist_turn(
                                     &session_id,
@@ -1559,10 +1578,6 @@ pub fn build_telegram_channels(
                                     .persist_usage(&session_id, &provider, &model, input, output)
                                     .await;
                             }
-                            let response = opencrust_security::InputValidator::truncate_output(
-                                &response,
-                                max_output_chars,
-                            );
                             Ok(response)
                         }
                     }
@@ -1966,6 +1981,10 @@ pub fn build_slack_channels(
                         state.update_session_summary(&session_id, &s);
                     }
 
+                    let response = opencrust_security::InputValidator::truncate_output(
+                        &response,
+                        max_output_chars,
+                    );
                     state
                         .persist_turn(
                             &session_id,
@@ -1985,10 +2004,6 @@ pub fn build_slack_channels(
                             .await;
                     }
 
-                    let response = opencrust_security::InputValidator::truncate_output(
-                        &response,
-                        max_output_chars,
-                    );
                     Ok(response)
                 })
             },
@@ -2189,6 +2204,10 @@ pub fn build_whatsapp_channels(
                         state.update_session_summary(&session_id, &s);
                     }
 
+                    let response = opencrust_security::InputValidator::truncate_output(
+                        &response,
+                        max_output_chars,
+                    );
                     state
                         .persist_turn(
                             &session_id,
@@ -2208,10 +2227,6 @@ pub fn build_whatsapp_channels(
                             .await;
                     }
 
-                    let response = opencrust_security::InputValidator::truncate_output(
-                        &response,
-                        max_output_chars,
-                    );
                     Ok(response)
                 })
             },
@@ -2397,6 +2412,10 @@ pub fn build_whatsapp_web_channels(
                         state.update_session_summary(&session_id, &s);
                     }
 
+                    let response = opencrust_security::InputValidator::truncate_output(
+                        &response,
+                        max_output_chars,
+                    );
                     state
                         .persist_turn(
                             &session_id,
@@ -2416,10 +2435,6 @@ pub fn build_whatsapp_web_channels(
                             .await;
                     }
 
-                    let response = opencrust_security::InputValidator::truncate_output(
-                        &response,
-                        max_output_chars,
-                    );
                     Ok(response)
                 })
             },
@@ -2566,6 +2581,10 @@ pub fn build_imessage_channels(
                         state.update_session_summary(&session_id, &s);
                     }
 
+                    let response = opencrust_security::InputValidator::truncate_output(
+                        &response,
+                        max_output_chars,
+                    );
                     state
                         .persist_turn(
                             &session_id,
@@ -2585,10 +2604,6 @@ pub fn build_imessage_channels(
                             .await;
                     }
 
-                    let response = opencrust_security::InputValidator::truncate_output(
-                        &response,
-                        max_output_chars,
-                    );
                     Ok(response)
                 })
             },
@@ -2775,6 +2790,10 @@ pub fn build_line_channels(
                         state.update_session_summary(&session_id, &s);
                     }
 
+                    let response = opencrust_security::InputValidator::truncate_output(
+                        &response,
+                        max_output_chars,
+                    );
                     state
                         .persist_turn(
                             &session_id,
@@ -2794,10 +2813,6 @@ pub fn build_line_channels(
                             .await;
                     }
 
-                    let response = opencrust_security::InputValidator::truncate_output(
-                        &response,
-                        max_output_chars,
-                    );
                     Ok(response)
                 })
             },
@@ -2980,6 +2995,10 @@ pub fn build_wechat_channels(
                         state.update_session_summary(&session_id, &s);
                     }
 
+                    let response = opencrust_security::InputValidator::truncate_output(
+                        &response,
+                        max_output_chars,
+                    );
                     state
                         .persist_turn(
                             &session_id,
@@ -2999,10 +3018,6 @@ pub fn build_wechat_channels(
                             .await;
                     }
 
-                    let response = opencrust_security::InputValidator::truncate_output(
-                        &response,
-                        max_output_chars,
-                    );
                     Ok(response)
                 })
             },

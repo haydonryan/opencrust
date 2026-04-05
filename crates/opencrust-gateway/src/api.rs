@@ -81,6 +81,57 @@ pub async fn send_message(
             .into_response();
     }
 
+    // Input validation
+    let guardrails = state.current_config().guardrails.clone();
+    let content = opencrust_security::InputValidator::sanitize(&body.content);
+    if opencrust_security::InputValidator::exceeds_length(&content, guardrails.max_input_chars) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("input rejected: message exceeds {} character limit", guardrails.max_input_chars)
+            })),
+        )
+            .into_response();
+    }
+    if opencrust_security::InputValidator::check_prompt_injection(&content) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "input rejected: potential prompt injection detected"
+            })),
+        )
+            .into_response();
+    }
+
+    // Rate limit (use session_id as user identity for API sessions)
+    let gateway_rate_limit = state.current_config().gateway.rate_limit.clone();
+    if let Err(e) = state.check_user_rate_limit(&session_id, &gateway_rate_limit) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response();
+    }
+
+    // Token budget check
+    if let Err(e) = state
+        .check_token_budget(&session_id, &session_id, &guardrails)
+        .await
+    {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response();
+    }
+
+    // Apply tool allowlist and per-session tool call budget
+    state.agents.set_session_tool_config(
+        &session_id,
+        guardrails.allowed_tools.clone(),
+        guardrails.session_tool_call_budget,
+    );
+
     // Hydrate history
     state
         .hydrate_session_history(&session_id, Some("api"), None)
@@ -97,7 +148,7 @@ pub async fn send_message(
             .agents
             .process_message_with_agent_config(
                 &session_id,
-                &body.content,
+                &content,
                 &history,
                 continuity_key.as_deref(),
                 None,
@@ -112,7 +163,7 @@ pub async fn send_message(
             .agents
             .process_message_with_agent_config(
                 &session_id,
-                &body.content,
+                &content,
                 &history,
                 continuity_key.as_deref(),
                 None,
@@ -127,7 +178,7 @@ pub async fn send_message(
             .agents
             .process_message_with_context(
                 &session_id,
-                &body.content,
+                &content,
                 &history,
                 continuity_key.as_deref(),
                 None,
@@ -137,12 +188,16 @@ pub async fn send_message(
 
     match result {
         Ok(response_text) => {
+            let response_text = opencrust_security::InputValidator::truncate_output(
+                &response_text,
+                guardrails.max_output_chars,
+            );
             state
                 .persist_turn(
                     &session_id,
                     Some("api"),
                     None,
-                    &body.content,
+                    &content,
                     &response_text,
                     None,
                 )

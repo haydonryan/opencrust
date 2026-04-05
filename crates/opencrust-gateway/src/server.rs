@@ -506,6 +506,14 @@ async fn execute_scheduled_task(
         .continuity_key(Some(task.user_id.as_str()))
         .map(|k| k.as_str().to_string());
 
+    // Apply tool allowlist and per-session tool call budget for scheduled tasks
+    let guardrails = state.current_config().guardrails.clone();
+    state.agents.set_session_tool_config(
+        &task.session_id,
+        guardrails.allowed_tools.clone(),
+        guardrails.session_tool_call_budget,
+    );
+
     let response_text = state
         .agents
         .process_heartbeat(

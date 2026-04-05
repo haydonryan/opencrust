@@ -21,13 +21,16 @@ pub fn build_reply_xml(to_user: &str, from_user: &str, text: &str) -> String {
         .unwrap_or_default()
         .as_secs();
 
+    // Escape any `]]>` in the content to prevent premature CDATA termination.
+    let safe_text = text.replace("]]>", "]]]]><![CDATA[>");
+
     format!(
         "<xml>\
             <ToUserName><![CDATA[{to_user}]]></ToUserName>\
             <FromUserName><![CDATA[{from_user}]]></FromUserName>\
             <CreateTime>{timestamp}</CreateTime>\
             <MsgType><![CDATA[text]]></MsgType>\
-            <Content><![CDATA[{text}]]></Content>\
+            <Content><![CDATA[{safe_text}]]></Content>\
         </xml>"
     )
 }
@@ -75,6 +78,15 @@ mod tests {
         assert!(xml.contains("<![CDATA[gh_abc]]>"));
         assert!(xml.contains("<![CDATA[hello]]>"));
         assert!(xml.contains("<MsgType><![CDATA[text]]></MsgType>"));
+    }
+
+    #[test]
+    fn reply_xml_escapes_cdata_terminator() {
+        // LLM response containing `]]>` must not break the XML envelope.
+        let xml = build_reply_xml("user", "gh_abc", "hello ]]> world");
+        assert!(xml.contains("]]]]><![CDATA[>"));
+        // Must be valid enough to not contain a bare `]]></Content>` mid-content
+        assert!(!xml.contains("]]></Content>") || xml.contains("]]]]><![CDATA[>"));
     }
 
     #[test]
