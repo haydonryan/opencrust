@@ -8,9 +8,9 @@ use tracing::{info, warn};
 
 use crate::traits::ChannelResponse;
 
-use super::LineChannel;
 use super::api;
 use super::fmt;
+use super::{LineChannel, LineFile};
 
 /// Shared state passed to LINE webhook handlers.
 pub type LineWebhookState = Arc<Vec<Arc<LineChannel>>>;
@@ -70,14 +70,51 @@ pub async fn line_webhook(
             Some(m) => m,
             None => continue,
         };
-        if msg.get("type").and_then(|v| v.as_str()).unwrap_or("") != "text" {
-            continue;
-        }
 
-        let text = match msg.get("text").and_then(|v| v.as_str()) {
-            Some(t) if !t.trim().is_empty() => t.to_string(),
+        let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+        // Extract text and an optional file depending on message type.
+        let (text, file_info) = match msg_type {
+            "text" => {
+                let t = msg
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                (t, None::<(String, String, Option<String>)>)
+            }
+            "file" => {
+                let msg_id = msg
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let filename = msg
+                    .get("fileName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("file")
+                    .to_string();
+                (String::new(), Some((msg_id, filename, None)))
+            }
+            "image" => {
+                let msg_id = msg
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let filename = format!("image_{msg_id}.jpg");
+                (
+                    String::new(),
+                    Some((msg_id, filename, Some("image/jpeg".to_string()))),
+                )
+            }
             _ => continue,
         };
+
+        // Skip if there is nothing to process.
+        if text.trim().is_empty() && file_info.is_none() {
+            continue;
+        }
 
         let reply_token = event
             .get("replyToken")
@@ -124,8 +161,52 @@ pub async fn line_webhook(
 
         let ch = Arc::clone(&channel);
         tokio::spawn(async move {
+            // Download file content if present.
+            let line_file = if let Some((msg_id, filename, mime_type)) = file_info {
+                match api::download_content(
+                    ch.client(),
+                    ch.channel_access_token(),
+                    &msg_id,
+                    ch.data_api_base_url(),
+                )
+                .await
+                {
+                    Ok(data) => Some(LineFile {
+                        filename,
+                        data,
+                        mime_type,
+                    }),
+                    Err(e) => {
+                        warn!("line: failed to download file content: {e}");
+                        let err_text = "Sorry, I could not download the file.";
+                        if !reply_token.is_empty() {
+                            let _ = api::reply(
+                                ch.client(),
+                                ch.channel_access_token(),
+                                &reply_token,
+                                err_text,
+                                ch.api_base_url(),
+                            )
+                            .await;
+                        } else if !user_id.is_empty() {
+                            let _ = api::push(
+                                ch.client(),
+                                ch.channel_access_token(),
+                                &user_id,
+                                err_text,
+                                ch.api_base_url(),
+                            )
+                            .await;
+                        }
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+
             let result = ch
-                .handle_incoming(&user_id, &context_id, &text, is_group)
+                .handle_incoming(&user_id, &context_id, &text, is_group, line_file)
                 .await;
             match result {
                 Ok(response) => {
@@ -216,7 +297,7 @@ mod tests {
     use crate::traits::ChannelResponse;
 
     fn make_state(secret: &str) -> LineWebhookState {
-        let on_msg: LineOnMessageFn = Arc::new(|_uid, _ctx, _text, _is_group, _| {
+        let on_msg: LineOnMessageFn = Arc::new(|_uid, _ctx, _text, _is_group, _file, _| {
             Box::pin(async { Ok(ChannelResponse::Text("reply".to_string())) })
         });
         let ch = Arc::new(LineChannel::new(
@@ -228,7 +309,7 @@ mod tests {
     }
 
     fn make_state_with_base_url(secret: &str, base_url: String) -> LineWebhookState {
-        let on_msg: LineOnMessageFn = Arc::new(|_uid, _ctx, _text, _is_group, _| {
+        let on_msg: LineOnMessageFn = Arc::new(|_uid, _ctx, _text, _is_group, _file, _| {
             Box::pin(async { Ok(ChannelResponse::Text("reply".to_string())) })
         });
         let ch = Arc::new(

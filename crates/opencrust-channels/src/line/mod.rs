@@ -21,10 +21,22 @@ use opencrust_common::{Message, MessageContent, Result};
 /// Returns `true` if the group message should be processed.
 pub type LineGroupFilter = Arc<dyn Fn(bool) -> bool + Send + Sync>;
 
-/// Callback invoked when the bot receives a text message from LINE.
+/// A file attached to a LINE message, with bytes already downloaded from the data API.
+#[derive(Debug, Clone)]
+pub struct LineFile {
+    /// Original filename as reported by LINE (present for `file` type; generated for images).
+    pub filename: String,
+    /// Raw file bytes.
+    pub data: Vec<u8>,
+    /// MIME type string if detectable (e.g. `"application/pdf"`).
+    pub mime_type: Option<String>,
+}
+
+/// Callback invoked when the bot receives a message from LINE.
 ///
-/// Arguments: `(user_id, context_id, text, is_group, delta_tx)`.
-/// `delta_tx` is always `None` — LINE does not support message editing.
+/// Arguments: `(user_id, context_id, text, is_group, file, delta_tx)`.
+/// `file` is `Some` when the user sent a document or image alongside (or instead of) text.
+/// `delta_tx` is always `None` — LINE does not support streaming message edits.
 /// Return `Err("__blocked__")` to silently drop (unauthorized user).
 pub type LineOnMessageFn = Arc<
     dyn Fn(
@@ -32,6 +44,7 @@ pub type LineOnMessageFn = Arc<
             String,
             String,
             bool,
+            Option<LineFile>,
             Option<mpsc::Sender<String>>,
         )
             -> Pin<Box<dyn Future<Output = std::result::Result<ChannelResponse, String>> + Send>>
@@ -44,6 +57,9 @@ pub struct LineChannel {
     channel_access_token: String,
     channel_secret: String,
     api_base_url: String,
+    /// Base URL for the LINE data API (file/image/audio downloads).
+    /// Defaults to `https://api-data.line.me/v2/bot`.
+    data_api_base_url: String,
     display: String,
     status: ChannelStatus,
     on_message: LineOnMessageFn,
@@ -75,6 +91,7 @@ impl LineChannel {
             channel_access_token,
             channel_secret,
             api_base_url: api::LINE_API_BASE.to_string(),
+            data_api_base_url: api::LINE_DATA_API_BASE.to_string(),
             display: "LINE".to_string(),
             status: ChannelStatus::Disconnected,
             on_message,
@@ -82,14 +99,20 @@ impl LineChannel {
         }
     }
 
-    /// Override the LINE API base URL (e.g. to point at a mock server in tests).
+    /// Override the LINE messaging API base URL (e.g. to point at a mock server in tests).
+    /// Also sets the data API base URL to the same value for test convenience.
     pub fn with_api_base_url(mut self, base_url: String) -> Self {
+        self.data_api_base_url = base_url.clone();
         self.api_base_url = base_url;
         self
     }
 
     pub fn api_base_url(&self) -> &str {
         &self.api_base_url
+    }
+
+    pub fn data_api_base_url(&self) -> &str {
+        &self.data_api_base_url
     }
 
     pub fn channel_access_token(&self) -> &str {
@@ -124,12 +147,14 @@ impl LineChannel {
         context_id: &str,
         text: &str,
         is_group: bool,
+        file: Option<LineFile>,
     ) -> std::result::Result<ChannelResponse, String> {
         (self.on_message)(
             user_id.to_string(),
             context_id.to_string(),
             text.to_string(),
             is_group,
+            file,
             None,
         )
         .await
@@ -249,7 +274,7 @@ mod tests {
     use super::*;
 
     fn make_on_msg() -> LineOnMessageFn {
-        Arc::new(|_uid, _ctx, _text, _is_group, _delta_tx| {
+        Arc::new(|_uid, _ctx, _text, _is_group, _file, _delta_tx| {
             Box::pin(async { Ok(ChannelResponse::Text("test".to_string())) })
         })
     }
@@ -282,6 +307,90 @@ mod tests {
         let ch = LineChannel::new("tok".to_string(), "sec".to_string(), make_on_msg());
         assert!(ch.group_filter()(false));
         assert!(ch.group_filter()(true));
+    }
+
+    // --- LineFile / file-ingest tests ---
+
+    #[test]
+    fn line_file_fields_accessible() {
+        let f = LineFile {
+            filename: "report.pdf".to_string(),
+            data: vec![1, 2, 3],
+            mime_type: Some("application/pdf".to_string()),
+        };
+        assert_eq!(f.filename, "report.pdf");
+        assert_eq!(f.data.len(), 3);
+        assert_eq!(f.mime_type.as_deref(), Some("application/pdf"));
+    }
+
+    #[test]
+    fn line_file_mime_type_optional() {
+        let f = LineFile {
+            filename: "data.bin".to_string(),
+            data: vec![],
+            mime_type: None,
+        };
+        assert!(f.mime_type.is_none());
+    }
+
+    #[tokio::test]
+    async fn on_message_callback_receives_line_file() {
+        let on_msg: LineOnMessageFn = Arc::new(|_uid, _ctx, _text, _is_group, file, _delta_tx| {
+            Box::pin(async move {
+                let name = file
+                    .map(|f| f.filename)
+                    .unwrap_or_else(|| "none".to_string());
+                Ok(ChannelResponse::Text(name))
+            })
+        });
+
+        let line_file = LineFile {
+            filename: "invoice.pdf".to_string(),
+            data: vec![0u8; 16],
+            mime_type: Some("application/pdf".to_string()),
+        };
+
+        let result = on_msg(
+            "U123".to_string(),
+            "U123".to_string(),
+            String::new(),
+            false,
+            Some(line_file),
+            None,
+        )
+        .await;
+
+        assert!(matches!(result, Ok(ChannelResponse::Text(t)) if t == "invoice.pdf"));
+    }
+
+    #[tokio::test]
+    async fn on_message_callback_with_no_file() {
+        let on_msg: LineOnMessageFn = Arc::new(|_uid, _ctx, _text, _is_group, file, _delta_tx| {
+            Box::pin(async move {
+                let name = file
+                    .map(|f| f.filename)
+                    .unwrap_or_else(|| "none".to_string());
+                Ok(ChannelResponse::Text(name))
+            })
+        });
+
+        let result = on_msg(
+            "U123".to_string(),
+            "U123".to_string(),
+            "hello".to_string(),
+            false,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(matches!(result, Ok(ChannelResponse::Text(t)) if t == "none"));
+    }
+
+    #[test]
+    fn channel_response_text_extracted_for_line() {
+        let r = ChannelResponse::Text("reply".to_string());
+        assert_eq!(r.text(), "reply");
     }
 
     #[test]

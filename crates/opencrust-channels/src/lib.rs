@@ -24,7 +24,7 @@ pub use imessage::{IMessageChannel, IMessageGroupFilter, IMessageOnMessageFn};
 #[cfg(feature = "line")]
 pub use line::webhook::{LineWebhookState, line_webhook};
 #[cfg(feature = "line")]
-pub use line::{LineChannel, LineGroupFilter, LineOnMessageFn};
+pub use line::{LineChannel, LineFile, LineGroupFilter, LineOnMessageFn};
 pub use protocol::{
     CONNECTOR_PROTOCOL_VERSION, ConnectorCapability, ConnectorFrame, ConnectorHandshake,
     MAX_CONNECTOR_FRAME_BYTES,

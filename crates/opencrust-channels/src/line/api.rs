@@ -1,6 +1,37 @@
 use reqwest::Client;
 
 pub const LINE_API_BASE: &str = "https://api.line.me/v2/bot";
+/// Separate hostname used for downloading message content (images, files, etc.).
+pub const LINE_DATA_API_BASE: &str = "https://api-data.line.me/v2/bot";
+
+/// Download the binary content of a LINE message (image, file, audio, video).
+///
+/// Uses the data API: `GET {data_base_url}/message/{message_id}/content`.
+/// Returns the raw bytes.
+pub async fn download_content(
+    client: &Client,
+    channel_access_token: &str,
+    message_id: &str,
+    data_base_url: &str,
+) -> Result<Vec<u8>, String> {
+    let resp = client
+        .get(format!("{data_base_url}/message/{message_id}/content"))
+        .bearer_auth(channel_access_token)
+        .send()
+        .await
+        .map_err(|e| format!("line download_content request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("line download_content error {status}: {body}"));
+    }
+
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| format!("line download_content read failed: {e}"))
+}
 
 /// Send a reply using a reply token (free, expires in 30 seconds, one use).
 pub async fn reply(
