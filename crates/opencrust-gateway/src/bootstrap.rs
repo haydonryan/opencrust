@@ -2485,12 +2485,17 @@ pub fn build_whatsapp_channels(
         let max_output_chars = config.guardrails.max_output_chars;
         let rate_limit_config = Arc::new(config.gateway.rate_limit.clone());
         let guardrails_config = Arc::new(config.guardrails.clone());
+        let data_dir_wa = config
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| opencrust_config::ConfigLoader::default_config_dir().join("data"));
 
         let on_message: WhatsAppOnMessageFn = Arc::new(
             move |from_number: String,
                   user_name: String,
                   text: String,
                   _is_group: bool,
+                  file: Option<opencrust_channels::whatsapp::WhatsAppFile>,
                   delta_tx: Option<tokio::sync::mpsc::Sender<String>>| {
                 let state = Arc::clone(&state_for_cb);
                 let allowlist = Arc::clone(&allowlist_for_cb);
@@ -2498,7 +2503,10 @@ pub fn build_whatsapp_channels(
                 let policy = Arc::clone(&policy_for_cb);
                 let rate_limit_config = Arc::clone(&rate_limit_config);
                 let guardrails_config = Arc::clone(&guardrails_config);
+                let data_dir = data_dir_wa.clone();
                 Box::pin(async move {
+                    let session_id = format!("whatsapp-{from_number}");
+
                     // WhatsApp Business is DM-only, always check auth
                     {
                         let mut list = allowlist.lock().unwrap();
@@ -2512,12 +2520,132 @@ pub fn build_whatsapp_channels(
                             "whatsapp",
                         ) {
                             Ok(None) => {}
-                            Ok(Some(welcome)) => return Ok(welcome),
+                            Ok(Some(welcome)) => return Ok(ChannelResponse::Text(welcome)),
                             Err(e) => return Err(e),
                         }
                     }
 
-                    let session_id = format!("whatsapp-{from_number}");
+                    // --- /ingest command ---
+                    if let Some(cmd) = text.strip_prefix('/') {
+                        let cmd_word = cmd.split_whitespace().next().unwrap_or("");
+                        if cmd_word == "ingest" {
+                            if let Some(pending) = state.take_pending_file(&session_id) {
+                                let doc_store =
+                                    opencrust_db::DocumentStore::open(&data_dir.join("memory.db"))
+                                        .map_err(|e| {
+                                            format!("failed to open document store: {e}")
+                                        })?;
+                                let embed = state.agents.embedding_provider();
+                                let replace = text.to_lowercase().contains("replace");
+                                return match crate::ingest::ingest_from_bytes(
+                                    &pending.filename,
+                                    &pending.data,
+                                    &doc_store,
+                                    embed.as_deref(),
+                                    replace,
+                                )
+                                .await
+                                {
+                                    Ok(result) => {
+                                        let action = if result.replaced {
+                                            "Replaced"
+                                        } else {
+                                            "Ingested"
+                                        };
+                                        let embed_note = if result.has_embeddings {
+                                            " with embeddings"
+                                        } else {
+                                            ""
+                                        };
+                                        Ok(ChannelResponse::Text(format!(
+                                            "{action} {} ({} chunks{embed_note}). You can now ask me anything about this document.",
+                                            pending.filename, result.chunk_count
+                                        )))
+                                    }
+                                    Err(e) => {
+                                        let msg = e.to_string();
+                                        if msg.contains("already ingested") {
+                                            Ok(ChannelResponse::Text(format!(
+                                                "{} is already ingested. Send it again with caption \"ingest replace\" to update it.",
+                                                pending.filename
+                                            )))
+                                        } else {
+                                            Err(format!(
+                                                "Failed to ingest {}: {msg}",
+                                                pending.filename
+                                            ))
+                                        }
+                                    }
+                                };
+                            } else {
+                                return Ok(ChannelResponse::Text(
+                                    "No pending file. Send a document first, then use /ingest."
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+
+                    // --- File handling ---
+                    if let Some(wa_file) = file {
+                        let fname = wa_file.filename.clone();
+                        let caption = text.trim().to_lowercase();
+                        if caption.contains("ingest") {
+                            let doc_store =
+                                opencrust_db::DocumentStore::open(&data_dir.join("memory.db"))
+                                    .map_err(|e| format!("failed to open document store: {e}"))?;
+                            let embed = state.agents.embedding_provider();
+                            let replace = caption.contains("replace");
+                            return match crate::ingest::ingest_from_bytes(
+                                &fname,
+                                &wa_file.data,
+                                &doc_store,
+                                embed.as_deref(),
+                                replace,
+                            )
+                            .await
+                            {
+                                Ok(result) => {
+                                    let action = if result.replaced {
+                                        "Replaced"
+                                    } else {
+                                        "Ingested"
+                                    };
+                                    let embed_note = if result.has_embeddings {
+                                        " with embeddings"
+                                    } else {
+                                        ""
+                                    };
+                                    Ok(ChannelResponse::Text(format!(
+                                        "{action} {fname} ({} chunks{embed_note}). You can now ask me anything about this document.",
+                                        result.chunk_count
+                                    )))
+                                }
+                                Err(e) => {
+                                    let msg = e.to_string();
+                                    if msg.contains("already ingested") {
+                                        Ok(ChannelResponse::Text(format!(
+                                            "{fname} is already ingested. Send it again with caption \"ingest replace\" to update it."
+                                        )))
+                                    } else {
+                                        Err(format!("Failed to ingest {fname}: {msg}"))
+                                    }
+                                }
+                            };
+                        } else {
+                            state.set_pending_file(
+                                &session_id,
+                                crate::state::PendingFile {
+                                    filename: fname.clone(),
+                                    data: wa_file.data,
+                                    received_at: std::time::Instant::now(),
+                                },
+                            );
+                            return Ok(ChannelResponse::Text(format!(
+                                "Received {fname}. Use /ingest to store it for future reference."
+                            )));
+                        }
+                    }
 
                     state.check_user_rate_limit(&from_number, &rate_limit_config)?;
                     state
@@ -2603,7 +2731,7 @@ pub fn build_whatsapp_channels(
                             .await;
                     }
 
-                    Ok(response)
+                    Ok(ChannelResponse::Text(response))
                 })
             },
         );
@@ -2699,6 +2827,7 @@ pub fn build_whatsapp_web_channels(
                   user_name: String,
                   text: String,
                   is_group: bool,
+                  _file: Option<opencrust_channels::whatsapp::WhatsAppFile>,
                   delta_tx: Option<tokio::sync::mpsc::Sender<String>>| {
                 let state = Arc::clone(&state_for_cb);
                 let allowlist = Arc::clone(&allowlist_for_cb);
@@ -2720,7 +2849,7 @@ pub fn build_whatsapp_web_channels(
                             "whatsapp-web",
                         ) {
                             Ok(None) => {}
-                            Ok(Some(welcome)) => return Ok(welcome),
+                            Ok(Some(welcome)) => return Ok(ChannelResponse::Text(welcome)),
                             Err(e) => return Err(e),
                         }
                     }
@@ -2811,7 +2940,7 @@ pub fn build_whatsapp_web_channels(
                             .await;
                     }
 
-                    Ok(response)
+                    Ok(ChannelResponse::Text(response))
                 })
             },
         );
@@ -2902,7 +3031,7 @@ pub fn build_imessage_channels(
                             &policy, &mut list, &pairing, &sender_id, "", &text, "imessage",
                         ) {
                             Ok(None) => {}
-                            Ok(Some(welcome)) => return Ok(welcome),
+                            Ok(Some(welcome)) => return Ok(ChannelResponse::Text(welcome)),
                             Err(e) => return Err(e),
                         }
                     }
@@ -2980,7 +3109,7 @@ pub fn build_imessage_channels(
                             .await;
                     }
 
-                    Ok(response)
+                    Ok(ChannelResponse::Text(response))
                 })
             },
         );

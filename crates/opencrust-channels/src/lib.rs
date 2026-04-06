@@ -44,4 +44,4 @@ pub use wechat::{WeChatChannel, WeChatGroupFilter, WeChatOnMessageFn};
 #[cfg(feature = "whatsapp-web")]
 pub use whatsapp::web::{WhatsAppWebChannel, WhatsAppWebGroupFilter};
 #[cfg(feature = "whatsapp")]
-pub use whatsapp::{WhatsAppChannel, WhatsAppOnMessageFn};
+pub use whatsapp::{WhatsAppChannel, WhatsAppFile, WhatsAppOnMessageFn};
