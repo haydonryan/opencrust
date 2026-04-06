@@ -845,6 +845,10 @@ pub fn build_discord_channels(
             .voice
             .tts_max_chars
             .unwrap_or(opencrust_media::TTS_DEFAULT_MAX_CHARS);
+        let data_dir_discord = config
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| opencrust_config::ConfigLoader::default_config_dir().join("data"));
 
         let on_message: opencrust_channels::discord::DiscordOnMessageFn = Arc::new(
             move |channel_id: String,
@@ -852,6 +856,7 @@ pub fn build_discord_channels(
                   user_name: String,
                   text: String,
                   is_group: bool,
+                  file: Option<opencrust_channels::discord::DiscordFile>,
                   delta_tx: Option<tokio::sync::mpsc::Sender<String>>| {
                 let state = Arc::clone(&state_for_cb);
                 let allowlist = Arc::clone(&allowlist_for_cb);
@@ -861,11 +866,73 @@ pub fn build_discord_channels(
                 let guardrails_config = Arc::clone(&guardrails_config);
                 let tts = tts_provider_discord.clone();
                 let tts_max_chars = tts_max_chars_discord;
+                let data_dir = data_dir_discord.clone();
                 Box::pin(async move {
+                    let session_id = format!("discord-{channel_id}");
+
+                    // --- /ingest command ---
                     if let Some(cmd) = text.strip_prefix('/') {
-                        let cmd = cmd.split_whitespace().next().unwrap_or("");
+                        let cmd_word = cmd.split_whitespace().next().unwrap_or("");
+                        if cmd_word == "ingest" {
+                            if let Some(pending) = state.take_pending_file(&session_id) {
+                                let doc_store =
+                                    opencrust_db::DocumentStore::open(&data_dir.join("memory.db"))
+                                        .map_err(|e| {
+                                            format!("failed to open document store: {e}")
+                                        })?;
+                                let embed = state.agents.embedding_provider();
+                                let replace = text.to_lowercase().contains("replace");
+                                return match crate::ingest::ingest_from_bytes(
+                                    &pending.filename,
+                                    &pending.data,
+                                    &doc_store,
+                                    embed.as_deref(),
+                                    replace,
+                                )
+                                .await
+                                {
+                                    Ok(result) => {
+                                        let action = if result.replaced {
+                                            "Replaced"
+                                        } else {
+                                            "Ingested"
+                                        };
+                                        let embed_note = if result.has_embeddings {
+                                            " with embeddings"
+                                        } else {
+                                            ""
+                                        };
+                                        Ok(ChannelResponse::Text(format!(
+                                            "{action} {} ({} chunks{embed_note}). You can now ask me anything about this document.",
+                                            pending.filename, result.chunk_count
+                                        )))
+                                    }
+                                    Err(e) => {
+                                        let msg = e.to_string();
+                                        if msg.contains("already ingested") {
+                                            Ok(ChannelResponse::Text(format!(
+                                                "{} is already ingested. Use /ingest replace to update it.",
+                                                pending.filename
+                                            )))
+                                        } else {
+                                            Err(format!(
+                                                "Failed to ingest {}: {msg}",
+                                                pending.filename
+                                            ))
+                                        }
+                                    }
+                                };
+                            } else {
+                                return Ok(ChannelResponse::Text(
+                                    "No pending file. Send a document first, then use /ingest."
+                                        .to_string(),
+                                ));
+                            }
+                        }
+
+                        // All other slash commands are handled synchronously.
                         return handle_discord_command(
-                            cmd,
+                            cmd_word,
                             &user_id,
                             &user_name,
                             &channel_id,
@@ -875,6 +942,67 @@ pub fn build_discord_channels(
                             &state,
                         )
                         .map(ChannelResponse::Text);
+                    }
+
+                    // --- File handling ---
+                    if let Some(discord_file) = file {
+                        let fname = discord_file.filename.clone();
+                        let caption = text.trim().to_lowercase();
+                        if caption.contains("ingest") {
+                            let doc_store =
+                                opencrust_db::DocumentStore::open(&data_dir.join("memory.db"))
+                                    .map_err(|e| format!("failed to open document store: {e}"))?;
+                            let embed = state.agents.embedding_provider();
+                            let replace = caption.contains("replace");
+                            return match crate::ingest::ingest_from_bytes(
+                                &fname,
+                                &discord_file.data,
+                                &doc_store,
+                                embed.as_deref(),
+                                replace,
+                            )
+                            .await
+                            {
+                                Ok(result) => {
+                                    let action = if result.replaced {
+                                        "Replaced"
+                                    } else {
+                                        "Ingested"
+                                    };
+                                    let embed_note = if result.has_embeddings {
+                                        " with embeddings"
+                                    } else {
+                                        ""
+                                    };
+                                    Ok(ChannelResponse::Text(format!(
+                                        "{action} {fname} ({} chunks{embed_note}). You can now ask me anything about this document.",
+                                        result.chunk_count
+                                    )))
+                                }
+                                Err(e) => {
+                                    let msg = e.to_string();
+                                    if msg.contains("already ingested") {
+                                        Ok(ChannelResponse::Text(format!(
+                                            "{fname} is already ingested. Send it again with caption \"ingest replace\" to update it."
+                                        )))
+                                    } else {
+                                        Err(format!("Failed to ingest {fname}: {msg}"))
+                                    }
+                                }
+                            };
+                        } else {
+                            state.set_pending_file(
+                                &session_id,
+                                crate::state::PendingFile {
+                                    filename: fname.clone(),
+                                    data: discord_file.data,
+                                    received_at: std::time::Instant::now(),
+                                },
+                            );
+                            return Ok(ChannelResponse::Text(format!(
+                                "Received {fname}. Use /ingest to store it for future reference."
+                            )));
+                        }
                     }
 
                     // Groups already filtered by channel handler - skip auth for groups
@@ -888,8 +1016,6 @@ pub fn build_discord_channels(
                             Err(e) => return Err(e),
                         }
                     }
-
-                    let session_id = format!("discord-{channel_id}");
 
                     state.check_user_rate_limit(&user_id, &rate_limit_config)?;
                     state
