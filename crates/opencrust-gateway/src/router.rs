@@ -129,7 +129,6 @@ pub fn build_router(
             "/api/providers/codex/oauth/complete",
             post(complete_codex_provider_oauth),
         )
-        .route("/auth/callback", get(handle_codex_provider_oauth_callback))
         .route(
             "/api/integrations/google/callback",
             get(handle_google_integration_callback),
