@@ -8,9 +8,9 @@ use tracing::{info, warn};
 
 use crate::traits::ChannelResponse;
 
-use super::LineChannel;
 use super::api;
 use super::fmt;
+use super::{LineChannel, LineFile};
 
 /// Shared state passed to LINE webhook handlers.
 pub type LineWebhookState = Arc<Vec<Arc<LineChannel>>>;
@@ -70,14 +70,51 @@ pub async fn line_webhook(
             Some(m) => m,
             None => continue,
         };
-        if msg.get("type").and_then(|v| v.as_str()).unwrap_or("") != "text" {
-            continue;
-        }
 
-        let text = match msg.get("text").and_then(|v| v.as_str()) {
-            Some(t) if !t.trim().is_empty() => t.to_string(),
+        let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+        // Extract text and an optional file depending on message type.
+        let (text, file_info) = match msg_type {
+            "text" => {
+                let t = msg
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                (t, None::<(String, String, Option<String>)>)
+            }
+            "file" => {
+                let msg_id = msg
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let filename = msg
+                    .get("fileName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("file")
+                    .to_string();
+                (String::new(), Some((msg_id, filename, None)))
+            }
+            "image" => {
+                let msg_id = msg
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let filename = format!("image_{msg_id}.jpg");
+                (
+                    String::new(),
+                    Some((msg_id, filename, Some("image/jpeg".to_string()))),
+                )
+            }
             _ => continue,
         };
+
+        // Skip if there is nothing to process.
+        if text.trim().is_empty() && file_info.is_none() {
+            continue;
+        }
 
         let reply_token = event
             .get("replyToken")
@@ -124,8 +161,52 @@ pub async fn line_webhook(
 
         let ch = Arc::clone(&channel);
         tokio::spawn(async move {
+            // Download file content if present.
+            let line_file = if let Some((msg_id, filename, mime_type)) = file_info {
+                match api::download_content(
+                    ch.client(),
+                    ch.channel_access_token(),
+                    &msg_id,
+                    ch.data_api_base_url(),
+                )
+                .await
+                {
+                    Ok(data) => Some(LineFile {
+                        filename,
+                        data,
+                        mime_type,
+                    }),
+                    Err(e) => {
+                        warn!("line: failed to download file content: {e}");
+                        let err_text = "Sorry, I could not download the file.";
+                        if !reply_token.is_empty() {
+                            let _ = api::reply(
+                                ch.client(),
+                                ch.channel_access_token(),
+                                &reply_token,
+                                err_text,
+                                ch.api_base_url(),
+                            )
+                            .await;
+                        } else if !user_id.is_empty() {
+                            let _ = api::push(
+                                ch.client(),
+                                ch.channel_access_token(),
+                                &user_id,
+                                err_text,
+                                ch.api_base_url(),
+                            )
+                            .await;
+                        }
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+
             let result = ch
-                .handle_incoming(&user_id, &context_id, &text, is_group)
+                .handle_incoming(&user_id, &context_id, &text, is_group, line_file)
                 .await;
             match result {
                 Ok(response) => {
@@ -216,7 +297,7 @@ mod tests {
     use crate::traits::ChannelResponse;
 
     fn make_state(secret: &str) -> LineWebhookState {
-        let on_msg: LineOnMessageFn = Arc::new(|_uid, _ctx, _text, _is_group, _| {
+        let on_msg: LineOnMessageFn = Arc::new(|_uid, _ctx, _text, _is_group, _file, _| {
             Box::pin(async { Ok(ChannelResponse::Text("reply".to_string())) })
         });
         let ch = Arc::new(LineChannel::new(
@@ -228,7 +309,7 @@ mod tests {
     }
 
     fn make_state_with_base_url(secret: &str, base_url: String) -> LineWebhookState {
-        let on_msg: LineOnMessageFn = Arc::new(|_uid, _ctx, _text, _is_group, _| {
+        let on_msg: LineOnMessageFn = Arc::new(|_uid, _ctx, _text, _is_group, _file, _| {
             Box::pin(async { Ok(ChannelResponse::Text("reply".to_string())) })
         });
         let ch = Arc::new(
@@ -502,5 +583,254 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    // ── File / image message tests ───────────────────────────────────────────
+
+    fn file_event(reply_token: &str, user_id: &str, msg_id: &str, filename: &str) -> Vec<u8> {
+        serde_json::json!({
+            "destination": "Uxxxxx",
+            "events": [{
+                "type": "message",
+                "replyToken": reply_token,
+                "source": {"type": "user", "userId": user_id},
+                "timestamp": 1234567890,
+                "message": {
+                    "id": msg_id,
+                    "type": "file",
+                    "fileName": filename,
+                    "fileSize": 1024
+                }
+            }]
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn image_event(reply_token: &str, user_id: &str, msg_id: &str) -> Vec<u8> {
+        serde_json::json!({
+            "destination": "Uxxxxx",
+            "events": [{
+                "type": "message",
+                "replyToken": reply_token,
+                "source": {"type": "user", "userId": user_id},
+                "timestamp": 1234567890,
+                "message": {
+                    "id": msg_id,
+                    "type": "image"
+                }
+            }]
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn make_state_with_file_callback(
+        secret: &str,
+        base_url: String,
+    ) -> (LineWebhookState, tokio::sync::mpsc::Receiver<String>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let on_msg: LineOnMessageFn =
+            Arc::new(move |_uid, _ctx, _text, _is_group, file, _delta_tx| {
+                let tx = tx.clone();
+                Box::pin(async move {
+                    // Echo the filename back so the test can assert on it.
+                    let name = file
+                        .map(|f| f.filename)
+                        .unwrap_or_else(|| "none".to_string());
+                    let _ = tx.send(name.clone()).await;
+                    Ok(ChannelResponse::Text(name))
+                })
+            });
+        let ch = Arc::new(
+            LineChannel::new("tok".to_string(), secret.to_string(), on_msg)
+                .with_api_base_url(base_url),
+        );
+        (Arc::new(vec![ch]), rx)
+    }
+
+    /// A "file" message event triggers a download from the data API and passes
+    /// the filename to the callback.
+    #[tokio::test]
+    async fn file_message_downloads_content_and_passes_to_callback() {
+        let mock_server = MockServer::start().await;
+
+        // Mock the data API content download.
+        Mock::given(method("GET"))
+            .and(path("/message/msg-001/content"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(b"PDF content here".to_vec())
+                    .insert_header("content-type", "application/pdf"),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        // Mock the reply API (callback echoes filename back).
+        Mock::given(method("POST"))
+            .and(path("/message/reply"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let secret = "test-secret";
+        let body = file_event("tok-file", "Uabc", "msg-001", "document.pdf");
+        let sig = sign(secret, &body);
+
+        let (state, mut rx) = make_state_with_file_callback(secret, mock_server.uri());
+
+        let resp = make_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/line")
+                    .header("x-line-signature", sig)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let received_filename = rx.try_recv().expect("callback should have been called");
+        assert_eq!(received_filename, "document.pdf");
+    }
+
+    /// An "image" message event triggers a download and generates a synthetic filename.
+    #[tokio::test]
+    async fn image_message_downloads_content_and_generates_filename() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/message/img-999/content"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(vec![0xFF, 0xD8, 0xFF]) // JPEG magic bytes
+                    .insert_header("content-type", "image/jpeg"),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/message/reply"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let secret = "test-secret";
+        let body = image_event("tok-img", "Uabc", "img-999");
+        let sig = sign(secret, &body);
+
+        let (state, mut rx) = make_state_with_file_callback(secret, mock_server.uri());
+
+        let resp = make_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/line")
+                    .header("x-line-signature", sig)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let received_filename = rx.try_recv().expect("callback should have been called");
+        assert_eq!(received_filename, "image_img-999.jpg");
+    }
+
+    /// When the data API returns an error, the handler sends an error reply and
+    /// does NOT invoke the callback.
+    #[tokio::test]
+    async fn file_download_failure_sends_error_reply() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/message/msg-bad/content"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        // Error reply should still be sent.
+        Mock::given(method("POST"))
+            .and(path("/message/reply"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let secret = "test-secret";
+        let body = file_event("tok-err", "Uabc", "msg-bad", "broken.pdf");
+        let sig = sign(secret, &body);
+
+        let (state, mut rx) = make_state_with_file_callback(secret, mock_server.uri());
+
+        let resp = make_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/line")
+                    .header("x-line-signature", sig)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // Callback must NOT have been called.
+        assert!(
+            rx.try_recv().is_err(),
+            "callback should not be called on download failure"
+        );
+    }
+
+    /// Unsupported message types (e.g. "sticker") are silently ignored.
+    #[tokio::test]
+    async fn unsupported_message_type_is_ignored() {
+        let secret = "test-secret";
+        let body = serde_json::json!({
+            "destination": "Uxxxxx",
+            "events": [{
+                "type": "message",
+                "replyToken": "tok-sticker",
+                "source": {"type": "user", "userId": "Uabc"},
+                "timestamp": 1234567890,
+                "message": {"id": "s1", "type": "sticker", "packageId": "1", "stickerId": "1"}
+            }]
+        })
+        .to_string()
+        .into_bytes();
+        let sig = sign(secret, &body);
+
+        let resp = make_router(make_state(secret))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/line")
+                    .header("x-line-signature", sig)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

@@ -3129,7 +3129,7 @@ pub fn build_line_channels(
     config: &AppConfig,
     state: &SharedState,
 ) -> Vec<Arc<opencrust_channels::line::LineChannel>> {
-    use opencrust_channels::line::{LineChannel, LineGroupFilter, LineOnMessageFn};
+    use opencrust_channels::line::{LineChannel, LineFile, LineGroupFilter, LineOnMessageFn};
 
     let mut channels = Vec::new();
 
@@ -3208,12 +3208,17 @@ pub fn build_line_channels(
             .voice
             .tts_max_chars
             .unwrap_or(opencrust_media::TTS_DEFAULT_MAX_CHARS);
+        let data_dir_line = config
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| opencrust_config::ConfigLoader::default_config_dir().join("data"));
 
         let on_message: LineOnMessageFn = Arc::new(
             move |user_id: String,
                   context_id: String,
                   text: String,
                   is_group: bool,
+                  file: Option<LineFile>,
                   delta_tx: Option<tokio::sync::mpsc::Sender<String>>| {
                 let state = Arc::clone(&state_for_cb);
                 let allowlist = Arc::clone(&allowlist_for_cb);
@@ -3223,6 +3228,7 @@ pub fn build_line_channels(
                 let guardrails_config = Arc::clone(&guardrails_config);
                 let tts = tts_provider_line.clone();
                 let tts_max_chars = tts_max_chars_line;
+                let data_dir = data_dir_line.clone();
                 Box::pin(async move {
                     if !is_group {
                         let mut list = allowlist.lock().unwrap();
@@ -3241,6 +3247,67 @@ pub fn build_line_channels(
                     } else {
                         format!("line-{user_id}")
                     };
+
+                    // /ingest — run pending file through the ingestion pipeline.
+                    if text.trim() == "/ingest" || text.trim().starts_with("/ingest ") {
+                        if let Some(pending) = state.take_pending_file(&session_id) {
+                            let doc_store =
+                                opencrust_db::DocumentStore::open(&data_dir.join("memory.db"))
+                                    .map_err(|e| format!("failed to open document store: {e}"))?;
+                            let embed = state.agents.embedding_provider();
+                            let replace = text.to_lowercase().contains("replace");
+                            return match crate::ingest::ingest_from_bytes(
+                                &pending.filename,
+                                &pending.data,
+                                &doc_store,
+                                embed.as_deref(),
+                                replace,
+                            )
+                            .await
+                            {
+                                Ok(result) => {
+                                    let note = if result.has_embeddings {
+                                        String::new()
+                                    } else {
+                                        " (no embedding provider — keyword search only)".to_string()
+                                    };
+                                    Ok(ChannelResponse::Text(format!(
+                                        "Ingested {}: {} chunk(s){}{note}.",
+                                        result.name,
+                                        result.chunk_count,
+                                        if result.replaced {
+                                            ", replaced previous version"
+                                        } else {
+                                            ""
+                                        },
+                                    )))
+                                }
+                                Err(e) => {
+                                    Ok(ChannelResponse::Text(format!("Ingestion failed: {e}")))
+                                }
+                            };
+                        } else {
+                            return Ok(ChannelResponse::Text(
+                                "No file pending. Send a document first, then /ingest.".to_string(),
+                            ));
+                        }
+                    }
+
+                    // File received — store as pending and prompt the user.
+                    if let Some(line_file) = file {
+                        let fname = line_file.filename.clone();
+                        state.set_pending_file(
+                            &session_id,
+                            crate::state::PendingFile {
+                                filename: line_file.filename,
+                                data: line_file.data,
+                                received_at: std::time::Instant::now(),
+                            },
+                        );
+                        return Ok(ChannelResponse::Text(format!(
+                            "File received: {fname}. Send /ingest to add it to memory, or /ingest replace to overwrite an existing version."
+                        )));
+                    }
 
                     state.check_user_rate_limit(&user_id, &rate_limit_config)?;
                     state
