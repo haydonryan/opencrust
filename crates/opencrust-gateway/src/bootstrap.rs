@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use opencrust_agents::tools::Tool;
@@ -47,14 +47,17 @@ pub(crate) fn read_auth_json_secret(key: &str) -> Option<String> {
 }
 
 pub(crate) fn persist_auth_json_secret(key: &str, value: &str) -> bool {
-    let path = default_auth_json_path();
+    persist_auth_json_secret_at(&default_auth_json_path(), key, value)
+}
+
+fn persist_auth_json_secret_at(path: &Path, key: &str, value: &str) -> bool {
     if let Some(parent) = path.parent()
         && std::fs::create_dir_all(parent).is_err()
     {
         return false;
     }
 
-    let mut json = std::fs::read_to_string(&path)
+    let mut json = std::fs::read_to_string(path)
         .ok()
         .and_then(|raw| {
             serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw).ok()
@@ -75,7 +78,24 @@ pub(crate) fn persist_auth_json_secret(key: &str, value: &str) -> bool {
         Err(_) => return false,
     };
 
-    std::fs::write(path, format!("{encoded}\n")).is_ok()
+    if std::fs::write(path, format!("{encoded}\n")).is_err() {
+        return false;
+    }
+
+    restrict_auth_json_permissions(path)
+}
+
+#[cfg(unix)]
+fn restrict_auth_json_permissions(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).is_ok()
+}
+
+#[cfg(not(unix))]
+fn restrict_auth_json_permissions(_path: &Path) -> bool {
+    // Platform-specific ACL hardening is not available via the Rust stdlib on non-Unix targets.
+    true
 }
 
 pub(crate) fn upsert_codex_config_entry() -> std::result::Result<(), String> {
@@ -3994,6 +4014,54 @@ mod tests {
             updated.llm.get("main").map(|cfg| cfg.provider.as_str()),
             Some("openai")
         );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn persist_auth_json_secret_writes_file() {
+        let dir = temp_dir("auth-json");
+        fs::create_dir_all(&dir).expect("failed to create temp dir");
+        let path = dir.join("auth.json");
+
+        assert!(persist_auth_json_secret_at(
+            &path,
+            "CODEX_ACCESS_TOKEN",
+            "secret-token"
+        ));
+
+        let raw = fs::read_to_string(&path).expect("auth.json should exist");
+        let json: serde_json::Value = serde_json::from_str(&raw).expect("auth.json should parse");
+        assert_eq!(
+            json.get("CODEX_ACCESS_TOKEN")
+                .and_then(serde_json::Value::as_str),
+            Some("secret-token")
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persist_auth_json_secret_restricts_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("auth-json-perms");
+        fs::create_dir_all(&dir).expect("failed to create temp dir");
+        let path = dir.join("auth.json");
+
+        assert!(persist_auth_json_secret_at(
+            &path,
+            "CODEX_REFRESH_TOKEN",
+            "secret-token"
+        ));
+
+        let mode = fs::metadata(&path)
+            .expect("auth.json metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
 
         let _ = fs::remove_dir_all(dir);
     }
